@@ -1,0 +1,40 @@
+[tool.ruff]
+# 지원할 파이썬 최소 버전
+target-version = "py310"
+
+# 한 줄 최대 길이 제한
+line-length = 100
+
+# 검사에서 제외할 디렉터리
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    "venv",
+    "__pypackages__",
+]
+
+[tool.ruff.lint]
+# 검사할 규칙 지정
+select = [
+    "E",  # pycodestyle errors (코드 스타일 오류)
+    "W",  # pycodestyle warnings (코드 스타일 경고)
+    "F",  # pyflakes (논리적 오류, 미사용 변수/임포트 등)
+    "I",  # isort (임포트 순서 자동 정렬)
+    "C90",# mccabe (코드 복잡도 검사)
+    "B",  # flake8-bugbear (흔히 발생하는 버그/설계 결함 발견)
+]
+
+# 무시할 규칙
+ignore = []
+
+# 미사용 임포트(`F401`)가 발견되면 경고만 하지 말고 포맷팅 시 자동으로 삭제할 것인가?
+# -> Yes, 자동 삭제 허용
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+# 문자열에 기본으로 큰따옴표(" ") 적용 (Black 스타일)
+quote-style = "double"
+# 들여쓰기는 스페이스 사용
+indent-style = "space"
