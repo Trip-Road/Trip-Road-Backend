@@ -39,10 +39,9 @@ class UserResponse(BaseModel):
     """유저 정보 응답 (프로필 사진 및 온보딩 여부 포함)"""
 
     user_id: int
-    email: str
     nickname: Optional[str]
-    profile_image_url: Optional[str]
-    is_onboarded: bool = False  # False일 경우 프론트에서 온보딩 화면으로 유도
+    profile_image: Optional[str] = None
+    is_onboarded: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -13,7 +13,7 @@ class UserProfileUpdateRequest(BaseModel):
     """닉네임 및 프로필 사진 업데이트 요청 (온보딩/수정용)"""
 
     nickname: Optional[str] = Field(None, min_length=2, max_length=20, description="변경할 닉네임")
-    profile_image_url: Optional[str] = Field(None, description="선택한 프로필 이미지 URL")
+    profile_image: Optional[str] = Field(None, description="선택한 프로필 이미지 URL")
 
 
 class UserTagUpdateRequest(BaseModel):
