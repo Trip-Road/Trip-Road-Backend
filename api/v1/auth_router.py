@@ -4,6 +4,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from sqlalchemy.orm import Session
 
+from api.deps import get_current_user
 from core.config import settings
 from core.security import create_access_token, create_refresh_token
 from db.mysql import get_db
@@ -90,3 +91,14 @@ def login_for_swagger(
     access_token = create_access_token(subject=user.user_id)
 
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+def logout(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    유저의 Refresh Token을 무효화
+    """
+    current_user.refresh_token = None
+    db.commit()
+
+    return {"message": "성공적으로 로그아웃 되었습니다."}

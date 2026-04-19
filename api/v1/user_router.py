@@ -59,3 +59,14 @@ def update_user_tags(
     db.refresh(current_user)
 
     return current_user
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    유저 레코드 및 연관된 데이터를 모두 삭제합니다.
+    """
+    db.delete(current_user)
+    db.commit()
+
+    return None
