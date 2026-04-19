@@ -52,3 +52,11 @@ class LoginResponse(BaseModel):
 
     tokens: TokenResponse
     user: UserResponse
+
+
+class TagCategoryResponse(BaseModel):
+    """
+    프론트엔드에서 카테고리별로 묶어서 태그를 보여주기 위한 딕셔너리 구조
+    """
+
+    pass

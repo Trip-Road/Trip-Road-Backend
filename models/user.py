@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, user_preferred_tags
@@ -18,13 +18,15 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     profile_image: Mapped[Optional[str]] = mapped_column(String(255))
 
+    is_onboarded: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Relationships
     preferred_tags: Mapped[List["Tag"]] = relationship(
         "Tag", secondary=user_preferred_tags, back_populates="preferring_users"
     )
-    search_histories: Mapped[List["SearchHistory"]] = relationship(
-        "SearchHistory", back_populates="user", cascade="all, delete-orphan"
-    )
-    favorite_places: Mapped[List["FavoritePlace"]] = relationship(
-        "FavoritePlace", back_populates="user", cascade="all, delete-orphan"
-    )
+    # search_histories: Mapped[List["SearchHistory"]] = relationship(
+    #     "SearchHistory", back_populates="user", cascade="all, delete-orphan"
+    # )
+    # favorite_places: Mapped[List["FavoritePlace"]] = relationship(
+    #     "FavoritePlace", back_populates="user", cascade="all, delete-orphan"
+    # )

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
 
@@ -17,7 +17,7 @@ class SearchHistory(Base):
     keyword: Mapped[str] = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    user: Mapped["User"] = relationship("User", back_populates="search_histories")
+    # user: Mapped["User"] = relationship("User", back_populates="search_histories")
 
 
 class FavoritePlace(Base):
@@ -32,8 +32,8 @@ class FavoritePlace(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    user: Mapped["User"] = relationship("User", back_populates="favorite_places")
-    place: Mapped["Place"] = relationship("Place", back_populates="favorited_by")
+    # user: Mapped["User"] = relationship("User", back_populates="favorite_places")
+    # place: Mapped["Place"] = relationship("Place", back_populates="favorited_by")
 
 
 class Event(Base):
