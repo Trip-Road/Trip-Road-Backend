@@ -10,7 +10,9 @@ from .base import Base, place_tags
 class Place(Base):
     __tablename__ = "Places"
 
-    place_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, comment="플레이스 id")
+    place_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False, comment="플레이스 id"
+    )
     name: Mapped[str] = mapped_column(String(100), nullable=False, comment="장소명")
     category: Mapped[Optional[str]] = mapped_column(String(50), comment="카테고리")
     region: Mapped[Optional[str]] = mapped_column(String(20), comment="구/군")
@@ -20,6 +22,7 @@ class Place(Base):
     latitude: Mapped[Optional[float]] = mapped_column(Numeric(10, 8), comment="위도")
     longitude: Mapped[Optional[float]] = mapped_column(Numeric(11, 8), comment="경도")
     image_url: Mapped[Optional[str]] = mapped_column(String(255), comment="장소 이미지 URL")
+    review_summary: Mapped[Optional[str]] = mapped_column(Text, comment="AI 리뷰 요약")
 
     # Relationships
     operating_hours: Mapped[List["OperatingHour"]] = relationship(

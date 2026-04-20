@@ -21,4 +21,3 @@ Thumbs.db
 
 # SQLite (if used locally)
 *.sqlite3
-test_login.html
