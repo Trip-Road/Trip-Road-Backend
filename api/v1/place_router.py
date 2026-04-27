@@ -7,6 +7,7 @@ from db.mysql import get_db
 from models.place import Place
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse
+from services.place_service import get_filtered_place_ids
 
 router = APIRouter()
 
@@ -23,8 +24,33 @@ def get_places(db: Session = Depends(get_db)):
 
 
 @router.post("/search")
-async def search_places(request: PlaceSearchRequest):
-    # request 객체를 PlaceService 또는 Repository로 넘겨서 DB 1차 필터링 시작
-    # valid_place_ids = await place_service.get_filtered_place_ids(request)
+def search_places(request: PlaceSearchRequest, db: Session = Depends(get_db)):
+    """
+    검색 조건에 맞는 장소를 1차로 RDBMS에서 필터링한 후,
+    AI 서비스로 넘기고 추천 받은 장소와 추천 이유를 반환(현재는 1차 필터링 반환)
+    """
 
-    return {"message": "DTO 연동 성공!", "data": request.dict()}
+    # 조건에 맞는 장소 ID 리스트 추출
+    valid_place_ids = get_filtered_place_ids(db, request)
+
+    # 만약 1차 필터링 결과가 없다면 바로 빈 결과 반환
+    if not valid_place_ids:
+        return {"message": "조건에 맞는 장소가 없습니다.", "data": []}
+
+    # -------------------------------------------------------------
+    # (다음 단계) AI 파트 개발자를 위한 영역
+    # 추출된 valid_place_ids와 request.keyword를 AIRecommendationService로 넘겨
+    # ChromaDB 하이브리드 검색 및 LLM 추천 이유를 생성하도록 넘김
+    #
+    # 예시:
+    # final_recommendations = ai_service.get_recommendations(
+    #     keyword=request.keyword,
+    #     valid_ids=valid_place_ids
+    # )
+    # -------------------------------------------------------------
+
+    return {
+        "message": "1차 필터링 완료",
+        "filtered_place_count": len(valid_place_ids),
+        "valid_place_ids": valid_place_ids,
+    }
