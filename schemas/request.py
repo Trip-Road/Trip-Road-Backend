@@ -1,3 +1,4 @@
+from datetime import date, time
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -26,3 +27,27 @@ class FavoriteCreate(BaseModel):
     """선호 장소 등록을 위한 요청 DTO"""
 
     place_id: int
+
+
+class PlaceSearchRequest(BaseModel):
+    # 검색어
+    keyword: Optional[str] = Field(
+        default=None, description="사용자가 입력한 검색어. 없을 경우 None"
+    )
+
+    # 카테고리
+    category: Optional[str] = Field(default=None, description="검색할 장소의 대분류")
+
+    # 지역
+    regions: Optional[List[str]] = Field(
+        default_factory=list, description="선택된 지역 목록. 비어있으면 대구 전체"
+    )
+
+    # 날짜 및 시간
+    target_date: Optional[date] = Field(default=None, description="방문 예정 날짜")
+    target_time: Optional[time] = Field(default=None, description="방문 예정 시간")
+
+    # 태그
+    tag_ids: Optional[List[int]] = Field(
+        default_factory=list, description="선택된 선호 태그의 ID 목록"
+    )
