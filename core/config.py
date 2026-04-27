@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 1일
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 14  # 14일
+    WEATHER_API_KEY: str
 
     class Config:
         env_file = ".env"
