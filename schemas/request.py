@@ -20,3 +20,9 @@ class UserTagUpdateRequest(BaseModel):
     """선호 태그 선택/수정 요청"""
 
     tag_ids: List[int] = Field(..., description="유저가 선택한 선호 태그 ID 리스트")
+
+
+class FavoriteCreate(BaseModel):
+    """선호 장소 등록을 위한 요청 DTO"""
+
+    place_id: int

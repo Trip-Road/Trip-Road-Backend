@@ -29,9 +29,9 @@ class Place(Base):
         "OperatingHour", back_populates="place", cascade="all, delete-orphan"
     )
     tags: Mapped[List["Tag"]] = relationship("Tag", secondary=place_tags, back_populates="places")
-    # favorited_by: Mapped[List["FavoritePlace"]] = relationship(
-    #     "FavoritePlace", back_populates="place", cascade="all, delete-orphan"
-    # )
+    favorited_by: Mapped[List["FavoritePlace"]] = relationship(
+        "FavoritePlace", back_populates="place", cascade="all, delete-orphan"
+    )
 
 
 class OperatingHour(Base):

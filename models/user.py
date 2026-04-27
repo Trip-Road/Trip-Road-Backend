@@ -24,9 +24,9 @@ class User(Base):
     preferred_tags: Mapped[List["Tag"]] = relationship(
         "Tag", secondary=user_preferred_tags, back_populates="preferring_users"
     )
-    # search_histories: Mapped[List["SearchHistory"]] = relationship(
-    #     "SearchHistory", back_populates="user", cascade="all, delete-orphan"
-    # )
-    # favorite_places: Mapped[List["FavoritePlace"]] = relationship(
-    #     "FavoritePlace", back_populates="user", cascade="all, delete-orphan"
-    # )
+    search_histories: Mapped[List["SearchHistory"]] = relationship(
+        "SearchHistory", back_populates="user", cascade="all, delete-orphan"
+    )
+    favorite_places: Mapped[List["FavoritePlace"]] = relationship(
+        "FavoritePlace", back_populates="user", cascade="all, delete-orphan"
+    )
