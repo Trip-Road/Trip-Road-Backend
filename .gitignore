@@ -18,6 +18,13 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
+.claude/
 
 # SQLite (if used locally)
 *.sqlite3
+
+# Local data & dev scripts
+data/
+seed.py
+store_to_chroma.py
+query_chroma.py
