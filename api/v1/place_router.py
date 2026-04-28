@@ -7,7 +7,7 @@ from db.mysql import get_db
 from models.place import Place
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse
-from services.place_service import get_filtered_place_ids
+from services.place_service import attach_place_info, get_filtered_place_ids
 from services.rag_graph import run_rag
 
 router = APIRouter()
@@ -22,31 +22,6 @@ def get_places(db: Session = Depends(get_db)):
     places = db.query(Place).options(joinedload(Place.tags)).limit(10).all()
 
     return places
-
-
-def _attach_place_info(rag_places: list[dict], db: Session) -> list[dict]:
-    """RAG 결과에 MySQL에서 조회한 name, image를 붙이고 summary를 제거한다."""
-    if not rag_places:
-        return []
-
-    place_ids = [p["place_id"] for p in rag_places]
-    rows = db.query(Place.place_id, Place.name, Place.image_url).filter(
-        Place.place_id.in_(place_ids)
-    ).all()
-    info_map = {row.place_id: {"name": row.name, "image": row.image_url or None} for row in rows}
-
-    result = []
-    for p in rag_places:
-        info = info_map.get(p["place_id"], {})
-        result.append({
-            "place_id" : p["place_id"],
-            "name"     : info.get("name"),
-            "category" : p["category"],
-            "tags"     : p["tags"],
-            "similarity": p["similarity"],
-            "image"    : info.get("image"),
-        })
-    return result
 
 
 @router.post("/search")
@@ -67,5 +42,5 @@ def search_places(request: PlaceSearchRequest, db: Session = Depends(get_db)):
     # 2차: Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
     result = run_rag(keyword=request.keyword, valid_ids=valid_place_ids)
 
-    places = _attach_place_info(result["places"], db)
+    places = attach_place_info(result["places"], db)
     return {"message": "검색 완료", "places": places, "ai_summary": result["ai_summary"]}
