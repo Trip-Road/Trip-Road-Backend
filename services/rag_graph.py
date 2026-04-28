@@ -138,14 +138,26 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
 
 def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     """LLM이 후보 중 최적 장소 선별 + 전체 추천 요약 생성"""
+    keyword    = state["keyword"]
     question   = state["question"]
     candidates = state["candidates"]
     n_results  = 10
 
+    # 원본 키워드 토큰 중 2자 이상인 단어가 요약에 포함된 후보를 앞으로 정렬
+    tokens = [t for t in keyword.replace(",", " ").split() if len(t) >= 2]
+    def _has_keyword(p: dict) -> bool:
+        summary_lower = p["summary"].lower()
+        return any(t.lower() in summary_lower for t in tokens)
+
+    priority   = [p for p in candidates if _has_keyword(p)]
+    fallback   = [p for p in candidates if not _has_keyword(p)]
+    sorted_candidates = priority + fallback
+
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
         f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}"
-        for p in candidates
+        + (" [핵심 키워드 포함]" if p in priority else "")
+        for p in sorted_candidates
     )
 
     json_format = (
@@ -157,7 +169,8 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"다음은 조건에 맞는 장소 목록입니다:\n{context}\n\n"
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
         f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 공통된 특징과 실질적인 이유를 summary에 2-3문장으로 작성하세요.\n"
-        f"완벽한 일치가 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
+        f"순서 규칙: 요약(summary)에 사용자가 원하는 항목이 명확히 언급된 장소를 places 배열의 앞순위에 배치하세요. "
+        f"명확한 언급이 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
 
@@ -324,7 +337,8 @@ if __name__ == "__main__":
                 state.update(node_out)
 
         # ── 최종 결과 출력 ──────────────────────────────────────────────
-        results = state.get("results", [])
+        results    = state.get("results", [])
+        ai_summary = state.get("ai_summary", "")
         print(f"\n{'─'*65}")
         print(f"최종 추천 {len(results)}개\n")
         for i, place in enumerate(results, 1):
@@ -332,9 +346,9 @@ if __name__ == "__main__":
             print(f"      카테고리  : {place['category']}")
             print(f"      태그      : {place['tags']}")
             print(f"      유사도    : {place['similarity']}")
-            print(f"      추천 이유 : {place.get('reason', '-')}")
             print(f"      요약      : {place['summary'][:80]}...")
             print()
+        print(f"AI 요약\n  {ai_summary}")
 
     # ── 테스트 케이스 ────────────────────────────────────────────────────────
     # _run_test(
@@ -358,6 +372,6 @@ if __name__ == "__main__":
     # )
 
     _run_test(
-        keyword="피규어가 잔뜩 있어서 볼게 가득한 카페",
+        keyword="카이막을 먹고싶어",
         category="cafe",
     )
