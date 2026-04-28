@@ -37,6 +37,28 @@ EMBED_MODEL     = "text-embedding-3-small"
 CHAT_MODEL      = "gpt-4o-mini"
 N_CANDIDATES    = 20
 
+# 한국어 조사·어미 (긴 것부터 먼저 매칭)
+_KO_ENDINGS = [
+    "으로부터", "로부터", "에서부터", "고싶어요", "고싶어", "고싶다",
+    "에서", "으로", "로", "에게서", "한테서", "에게", "한테",
+    "에", "을", "를", "이", "가", "은", "는", "과", "와",
+    "도", "만", "까지", "부터", "처럼", "같이",
+]
+
+
+def _extract_item_tokens(keyword: str) -> list[str]:
+    """키워드에서 조사/어미를 제거한 핵심 토큰(2자 이상)을 추출."""
+    result = []
+    for t in keyword.replace(",", " ").split():
+        stemmed = t
+        for ending in _KO_ENDINGS:
+            if t.endswith(ending) and len(t) - len(ending) >= 2:
+                stemmed = t[:-len(ending)]
+                break
+        if len(stemmed) >= 2:
+            result.append(stemmed)
+    return list(dict.fromkeys(result))
+
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
 _openai: OpenAI | None = None
@@ -96,7 +118,8 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
 
 
 def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
-    """ChromaDB 시맨틱 검색 (valid_ids 범위 내)"""
+    """ChromaDB 시맨틱 검색 + 아이템 텍스트 직접 검색 (valid_ids 범위 내)"""
+    keyword   = state["keyword"]
     question  = state["question"]
     valid_ids = state["valid_ids"]
 
@@ -109,29 +132,64 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
         .data[0].embedding
     )
 
-    n_query = min(N_CANDIDATES, len(valid_ids))
     collection = get_chroma_client().get_collection(name=COLLECTION_NAME)
-    results = collection.query(
+    where_ids  = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
+
+    def _to_candidate(m: dict, doc: str, dist: float, exact: bool) -> dict:
+        return {
+            "place_id"   : int(m["place_id"]),
+            "category"   : m.get("category", ""),
+            "tags"       : [t for t in m.get("tags", "").split(",") if t],
+            "summary"    : doc,
+            "similarity" : round(1 - dist, 4),
+            "exact_match": exact,
+        }
+
+    # 1) 핵심 토큰으로 문서 직접 검색 (exact match)
+    item_tokens = _extract_item_tokens(keyword)
+    exact_map: dict[int, dict] = {}
+    for token in item_tokens:
+        try:
+            res = collection.query(
+                query_embeddings=[embedding],
+                n_results=min(10, len(valid_ids)),
+                where=where_ids,
+                where_document={"$contains": token},
+                include=["metadatas", "documents", "distances"],
+            )
+            for m, doc, dist in zip(
+                res["metadatas"][0], res["documents"][0], res["distances"][0]
+            ):
+                pid = int(m["place_id"])
+                if pid not in exact_map:
+                    exact_map[pid] = _to_candidate(m, doc, dist, exact=True)
+        except Exception:
+            pass
+
+    # 2) 시맨틱 검색
+    n_query = min(N_CANDIDATES, len(valid_ids))
+    results  = collection.query(
         query_embeddings=[embedding],
         n_results=n_query,
-        where={"place_id": {"$in": [str(pid) for pid in valid_ids]}},
+        where=where_ids,
         include=["metadatas", "documents", "distances"],
     )
-
-    candidates = [
-        {
-            "place_id"  : int(m["place_id"]),
-            "category"  : m.get("category", ""),
-            "tags"      : [t for t in m.get("tags", "").split(",") if t],
-            "summary"   : doc,
-            "similarity": round(1 - dist, 4),
-        }
+    semantic_list = [
+        _to_candidate(m, doc, dist, exact=int(m["place_id"]) in exact_map)
         for m, doc, dist in zip(
             results["metadatas"][0],
             results["documents"][0],
             results["distances"][0],
         )
     ]
+
+    # 3) 병합: exact match 먼저, 이후 semantic (중복 제거)
+    seen       = set(exact_map.keys())
+    candidates = list(exact_map.values())
+    for p in semantic_list:
+        if p["place_id"] not in seen:
+            seen.add(p["place_id"])
+            candidates.append(p)
 
     return {"candidates": candidates}
 
@@ -143,20 +201,31 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     candidates = state["candidates"]
     n_results  = 10
 
-    # 원본 키워드 토큰 중 2자 이상인 단어가 요약에 포함된 후보를 앞으로 정렬
-    tokens = [t for t in keyword.replace(",", " ").split() if len(t) >= 2]
-    def _has_keyword(p: dict) -> bool:
-        summary_lower = p["summary"].lower()
-        return any(t.lower() in summary_lower for t in tokens)
+    # exact_match(텍스트 직접 검색) → 키워드 포함 → 나머지 순으로 정렬
+    item_tokens = _extract_item_tokens(keyword)
 
-    priority   = [p for p in candidates if _has_keyword(p)]
-    fallback   = [p for p in candidates if not _has_keyword(p)]
-    sorted_candidates = priority + fallback
+    def _priority_level(p: dict) -> int:
+        if p.get("exact_match"):
+            return 0
+        summary_lower = p["summary"].lower()
+        if any(t.lower() in summary_lower for t in item_tokens):
+            return 1
+        return 2
+
+    sorted_candidates = sorted(candidates, key=_priority_level)
+
+    def _label(p: dict) -> str:
+        lvl = _priority_level(p)
+        if lvl == 0:
+            return " [핵심 아이템 직접 보유]"
+        if lvl == 1:
+            return " [핵심 키워드 포함]"
+        return ""
 
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
         f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}"
-        + (" [핵심 키워드 포함]" if p in priority else "")
+        + _label(p)
         for p in sorted_candidates
     )
 
@@ -169,8 +238,8 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"다음은 조건에 맞는 장소 목록입니다:\n{context}\n\n"
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
         f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 공통된 특징과 실질적인 이유를 summary에 2-3문장으로 작성하세요.\n"
-        f"순서 규칙: 요약(summary)에 사용자가 원하는 항목이 명확히 언급된 장소를 places 배열의 앞순위에 배치하세요. "
-        f"명확한 언급이 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
+        f"순서 규칙: '[핵심 아이템 직접 보유]' 표시 장소를 최우선으로, '[핵심 키워드 포함]' 표시 장소를 그 다음 순위로 places 배열에 배치하세요. "
+        f"해당 표시가 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
 
@@ -252,8 +321,14 @@ def run_rag(keyword: str, valid_ids: list[int]) -> dict:
         "ai_summary": "",
     }
 
-    final = _graph.invoke(initial)
-    return {"places": final["results"], "ai_summary": final["ai_summary"]}
+    _INTERNAL_KEYS = {"exact_match", "summary"}
+
+    final  = _graph.invoke(initial)
+    places = [
+        {k: v for k, v in p.items() if k not in _INTERNAL_KEYS}
+        for p in final["results"]
+    ]
+    return {"places": places, "ai_summary": final["ai_summary"]}
 
 
 # ── 테스트 (직접 실행 시) ─────────────────────────────────────────────────────
@@ -325,7 +400,8 @@ if __name__ == "__main__":
                 candidates = node_out.get("candidates", [])
                 print(f"\n  [retrieve] 후보 {len(candidates)}개")
                 for c in candidates:
-                    print(f"    {c['place_id']} | {c['category']} | 유사도 {c['similarity']} | {c['tags']}")
+                    mark = " ★EXACT" if c.get("exact_match") else ""
+                    print(f"    {c['place_id']} | {c['category']} | 유사도 {c['similarity']} | {c['tags']}{mark}")
                 state.update(node_out)
 
             elif node_name == "generate":
@@ -371,7 +447,12 @@ if __name__ == "__main__":
     #     category="restaurant",
     # )
 
+    # _run_test(
+    #     keyword="카이막을 먹고싶어",
+    #     category="cafe",
+    # )
+
     _run_test(
-        keyword="카이막을 먹고싶어",
+        keyword="딸기라떼가 맛있는 곳을 추천해줘",
         category="cafe",
     )
