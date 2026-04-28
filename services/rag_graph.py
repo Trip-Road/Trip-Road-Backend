@@ -57,6 +57,7 @@ class PlaceRAGState(TypedDict):
     valid_ids  : list[int]   # MySQL 1차 필터 결과 (입력으로 주입)
     candidates : list[dict]  # ChromaDB retrieve 결과 (상위 N개)
     results    : list[dict]  # 최종 추천 결과
+    ai_summary : str         # 전체 추천 결과에 대한 AI 요약
 
 
 # ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
 
 
 def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
-    """LLM이 후보 중 최적 장소 선별 + 추천 이유 생성"""
+    """LLM이 후보 중 최적 장소 선별 + 전체 추천 요약 생성"""
     question   = state["question"]
     candidates = state["candidates"]
     n_results  = 10
@@ -147,12 +148,15 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         for p in candidates
     )
 
-    json_format = '{"places": [{"place_id": 정수, "reason": "추천 이유 한 문장"}]}'
+    json_format = (
+        '{"places": [{"place_id": 정수}], '
+        '"summary": "선택된 장소들을 왜 이 사용자에게 추천하는지 실질적인 이유를 2-3문장으로 설명"}'
+    )
     prompt = (
         f'사용자 검색어: "{question}"\n\n'
         f"다음은 조건에 맞는 장소 목록입니다:\n{context}\n\n"
-        f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라, "
-        f"각각 한 줄 추천 이유를 작성하세요.\n"
+        f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
+        f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 공통된 특징과 실질적인 이유를 summary에 2-3문장으로 작성하세요.\n"
         f"완벽한 일치가 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
@@ -164,21 +168,24 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         response_format={"type": "json_object"},
     )
 
-    ranked = json.loads(resp.choices[0].message.content).get("places", [])
+    raw = json.loads(resp.choices[0].message.content)
+    ranked     = raw.get("places", [])
+    ai_summary = raw.get("summary", "")
+
     candidate_map = {p["place_id"]: p for p in candidates}
 
     results = []
     for item in ranked[:n_results]:
         pid = int(item["place_id"])
         if pid in candidate_map:
-            results.append({**candidate_map[pid], "reason": item["reason"]})
+            results.append(candidate_map[pid])
 
-    return {"results": results}
+    return {"results": results, "ai_summary": ai_summary}
 
 
 def _node_no_result(state: PlaceRAGState) -> PlaceRAGState:
     """후보가 없을 때 빈 결과 반환"""
-    return {"results": []}
+    return {"results": [], "ai_summary": ""}
 
 
 # ── 조건부 엣지 ───────────────────────────────────────────────────────────────
@@ -215,13 +222,13 @@ _graph = _build_graph()
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def run_rag(keyword: str, valid_ids: list[int]) -> list[dict]:
+def run_rag(keyword: str, valid_ids: list[int]) -> dict:
     """
     MySQL 1차 필터 결과(valid_ids)를 받아 RAG 파이프라인 실행.
-    반환: [{"place_id", "category", "tags", "summary", "similarity", "reason"}, ...]
+    반환: {"places": [{"place_id", "category", "tags", "summary", "similarity"}, ...], "ai_summary": "..."}
     """
     if not keyword or not valid_ids:
-        return []
+        return {"places": [], "ai_summary": ""}
 
     initial: PlaceRAGState = {
         "keyword"   : keyword,
@@ -229,10 +236,11 @@ def run_rag(keyword: str, valid_ids: list[int]) -> list[dict]:
         "valid_ids" : valid_ids,
         "candidates": [],
         "results"   : [],
+        "ai_summary": "",
     }
 
     final = _graph.invoke(initial)
-    return final["results"]
+    return {"places": final["results"], "ai_summary": final["ai_summary"]}
 
 
 # ── 테스트 (직접 실행 시) ─────────────────────────────────────────────────────

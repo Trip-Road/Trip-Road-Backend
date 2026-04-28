@@ -54,25 +54,31 @@ POST /api/v1/places/search
   │  retrieve  ChromaDB 시맨틱 검색               │
   │            valid_ids 풀 안에서 유사도 상위 20개  │
   │     ↓                                        │
-  │  generate  후보 중 최적 10개 선별 + 추천 이유     │
+  │  generate  후보 중 최적 10개 선별 +              │
+  │            전체 결과에 대한 AI 요약 생성(2-3문장)  │
   │  (또는 no_result: 후보 없으면 빈 리스트 반환)    │
   └─────────────────────────────────────────────┘
         │
         ▼
-  [{"place_id", "category", "tags", "summary", "similarity", "reason"}, ...]
+  {
+    "places": [{"place_id", "category", "tags", "summary", "similarity"}, ...],
+    "ai_summary": "선택된 장소들을 이 사용자에게 추천하는 이유 2-3문장"
+  }
 ```
 
 ### `run_rag()` 시그니처
 
 ```python
 # services/rag_graph.py
-def run_rag(keyword: str, valid_ids: list[int]) -> list[dict]:
+def run_rag(keyword: str, valid_ids: list[int]) -> dict:
     ...
 ```
 
 - `keyword`: 사용자 입력 검색어 (내부에서 rewrite됨)
 - `valid_ids`: MySQL 1차 필터로 걸러진 place_id 목록
-- 반환: 최대 10개의 추천 장소 리스트
+- 반환: `{"places": [...], "ai_summary": "..."}`
+  - `places`: 최대 10개의 추천 장소 리스트
+  - `ai_summary`: 선택된 장소들을 사용자에게 추천하는 이유 (2-3문장)
 
 ### 단독 테스트 실행
 
