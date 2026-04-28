@@ -70,3 +70,13 @@ def delete_user(db: Session = Depends(get_db), current_user: User = Depends(get_
     db.commit()
 
     return None
+
+
+@router.get("/me", response_model=UserResponse)
+def get_my_profile(current_user: User = Depends(get_current_user)):
+    """
+    내 프로필 정보 조회
+    현재 로그인한 유저의 닉네임, 프로필 이미지, 온보딩 상태, 선호 태그를 반환
+    """
+
+    return current_user

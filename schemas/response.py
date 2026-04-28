@@ -42,6 +42,7 @@ class UserResponse(BaseModel):
     nickname: Optional[str]
     profile_image: Optional[str] = None
     is_onboarded: bool = False
+    preferred_tags: List[TagResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
 
