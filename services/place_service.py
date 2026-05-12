@@ -1,7 +1,8 @@
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
+from models.history_and_event import FavoritePlace
 from models.place import Place
 from models.tag import Tag
 from schemas.request import PlaceSearchRequest
@@ -67,3 +68,32 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
     result = query.distinct().all()
 
     return [row[0] for row in result]
+
+
+def get_place_detail_info(db: Session, place_id: int, user_id: int) -> Optional[dict]:
+    place = db.query(Place).filter(Place.place_id == place_id).first()
+    if not place:
+        return None
+
+    is_favorite = False
+    if user_id:
+        fav = (
+            db.query(FavoritePlace)
+            .filter(FavoritePlace.user_id == user_id, FavoritePlace.place_id == place_id)
+            .first()
+        )
+        is_favorite = fav is not None
+
+    return {
+        "place_id": place.place_id,
+        "name": place.name,
+        "category": place.category,
+        "address": place.address,
+        "latitude": place.latitude,
+        "longitude": place.longitude,
+        "image_url": place.image_url,
+        "is_favorite": is_favorite,
+        "business_hours": place.business_hours,
+        "review_summary": getattr(place, "review_summary", None),
+        "tags": [tag.tag_name for tag in place.tags],
+    }

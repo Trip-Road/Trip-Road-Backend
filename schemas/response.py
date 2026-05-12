@@ -60,3 +60,20 @@ class TagCategoryResponse(BaseModel):
     """
 
     pass
+
+
+class PlaceDetailResponse(BaseModel):
+    place_id: int
+    name: str
+    category: str
+    address: str
+    latitude: float
+    longitude: float
+    image_url: Optional[str] = None
+    is_favorite: bool
+    business_hours: Optional[str] = None
+    review_summary: Optional[str] = None
+    tags: List[str]
+
+    class Config:
+        from_attributes = True
