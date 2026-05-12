@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from api.v1 import (
     auth_router,
+    event_router,
     favorite_router,
     place_router,
     tag_router,
@@ -17,3 +18,4 @@ api_router.include_router(user_router.router, prefix="/users", tags=["Users"])
 api_router.include_router(tag_router.router, prefix="/tags", tags=["Tags"])
 api_router.include_router(favorite_router.router, prefix="/favorites", tags=["Favorites"])
 api_router.include_router(weather_router.router, prefix="/weather", tags=["Weather"])
+api_router.include_router(event_router.router, prefix="/events", tags=["Events"])

@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -62,6 +63,10 @@ class TagCategoryResponse(BaseModel):
 
 
 class PlaceDetailResponse(BaseModel):
+    """
+    장소 상세 조회 응답 DTO
+    """
+
     place_id: int
     name: str
     category: str
@@ -76,3 +81,19 @@ class PlaceDetailResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class EventResponse(BaseModel):
+    """
+    행사 목록 조회 응답 DTO
+    """
+
+    event_id: int
+    title: str
+    region: str
+    address: Optional[str] = None
+    start_date: date
+    end_date: date
+    image_url: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
