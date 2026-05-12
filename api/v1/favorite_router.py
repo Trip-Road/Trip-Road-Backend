@@ -80,4 +80,17 @@ def get_user_favorites(
         .all()
     )
 
-    return fav_places
+    result = []
+    for place in fav_places:
+        place_dict = {
+            "place_id": place.place_id,
+            "name": place.name,
+            "category": place.category,
+            "region": place.region,
+            "image_url": place.image_url,
+            "tags": place.tags,
+            "is_favorite": True,
+        }
+        result.append(place_dict)
+
+    return result

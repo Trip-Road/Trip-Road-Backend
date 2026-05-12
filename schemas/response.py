@@ -20,10 +20,9 @@ class PlaceCardResponse(BaseModel):
     category: str
     region: str
     image_url: Optional[str] = None
-    # 장소에 연결된 태그들 중 대표적인 것들만 포함
     tags: List[TagResponse] = []
+    is_favorite: bool = False
 
-    # SQLAlchemy 모델 객체를 Pydantic DTO로 자동 변환하기 위한 설정
     model_config = ConfigDict(from_attributes=True)
 
 
