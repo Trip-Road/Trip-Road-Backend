@@ -1,10 +1,13 @@
+from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import desc
 from sqlalchemy.orm import Session, joinedload
 
 from api.deps import get_current_user
 from db.mysql import get_db
+from models.history_and_event import SearchHistory
 from models.place import Place
 from models.user import User
 from schemas.request import PlaceSearchRequest
@@ -27,7 +30,11 @@ def get_places(db: Session = Depends(get_db)):
 
 
 @router.post("/search")
-def search_places(request: PlaceSearchRequest, db: Session = Depends(get_db)):
+def search_places(
+    request: PlaceSearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     1차: RDBMS에서 카테고리/지역/시간/태그 조건으로 필터링
     2차: ChromaDB 시맨틱 검색으로 랭킹
@@ -37,6 +44,37 @@ def search_places(request: PlaceSearchRequest, db: Session = Depends(get_db)):
 
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": []}
+
+    # 검색어 저장 및 관리
+    if request.keyword:
+        existing_history = (
+            db.query(SearchHistory)
+            .filter(
+                SearchHistory.user_id == current_user.user_id,
+                SearchHistory.keyword == request.keyword,
+            )
+            .first()
+        )
+
+    if existing_history:
+        existing_history.created_at = datetime.now()
+    else:
+        new_history = SearchHistory(user_id=current_user.user_id, keyword=request.keyword)
+        db.add(new_history)
+
+    db.commit()
+
+    user_histories = (
+        db.query(SearchHistory)
+        .filter(SearchHistory.user_id == current_user.user_id)
+        .order_by(desc(SearchHistory.created_at))
+        .all()
+    )
+
+    if len(user_histories) > 10:
+        for old_history in user_histories[10:]:
+            db.delete(old_history)
+        db.commit()
 
     if not request.keyword:
         return {

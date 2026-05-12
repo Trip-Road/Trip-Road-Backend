@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -97,3 +97,16 @@ class EventResponse(BaseModel):
     image_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SearchHistoryResponse(BaseModel):
+    """
+    검색 기록 조회 응답 DTO
+    """
+
+    history_id: int
+    keyword: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
