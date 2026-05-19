@@ -74,12 +74,14 @@ def _client() -> OpenAI:
 # ── GraphState ────────────────────────────────────────────────────────────────
 
 class PlaceRAGState(TypedDict):
-    keyword    : str         # 원본 사용자 입력 (불변)
-    question   : str         # rewrite 이후 최적화된 검색 쿼리
-    valid_ids  : list[int]   # MySQL 1차 필터 결과 (입력으로 주입)
-    candidates : list[dict]  # ChromaDB retrieve 결과 (상위 N개)
-    results    : list[dict]  # 최종 추천 결과
-    ai_summary : str         # 전체 추천 결과에 대한 AI 요약
+    keyword      : str         # 원본 사용자 입력 (불변)
+    question     : str         # rewrite 이후 최적화된 검색 쿼리
+    valid_ids    : list[int]   # MySQL 1차 필터 결과 (입력으로 주입)
+    candidates   : list[dict]  # ChromaDB retrieve 결과 (상위 N개)
+    results      : list[dict]  # 최종 추천 결과
+    ai_summary   : str         # 전체 추천 결과에 대한 AI 요약
+    weather_info : dict        # 날씨 정보 (temperature, condition) — 없으면 {}
+    visit_context: dict        # 방문 조건 (target_date, target_time, category) — 없으면 {}
 
 
 # ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
@@ -88,10 +90,11 @@ _REWRITE_SYSTEM = """당신은 장소 추천 검색 전문가입니다.
 사용자의 자연어 질문을 벡터 검색에 최적화된 간결한 문장으로 재작성하세요.
 
 재작성 시 아래 요소를 추출하여 명시적으로 포함하세요.
-- 장소 유형 (카페, 식당, 공원 등)
-- 방문 목적 (공부, 식사, 데이트, 모임 등)
-- 동반자 유형 (혼자, 친구, 커플, 가족 등)
-- 분위기·조건 키워드 (조용한, 넓은, 뷰가 좋은, 주차 가능 등)
+- 장소 유형 (카페, 식당, 공원, 박물관, 전망대, 시장, 테마파크 등)
+- 방문 목적 (공부, 식사, 데이트, 모임, 산책, 관람, 체험, 야경 감상, 등산 등)
+- 동반자 유형 (혼자, 친구, 커플, 가족, 아이, 부모님 등)
+- 분위기·조건 키워드 (조용한, 넓은, 뷰가 좋은, 고즈넉한, 활기찬, 이색적인, 역사적인, 자연 속 등)
+- 관광 유형 — 관광지 검색 시 해당하는 유형 (자연/풍경, 역사/유적, 문화/전시, 테마파크/놀이, 시장/쇼핑)
 - 가격대 (가성비, 합리적, 프리미엄 등)
 
 규칙:
@@ -229,15 +232,43 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         for p in sorted_candidates
     )
 
+    # 방문 조건 한 줄 구성 (날짜·카테고리·날씨)
+    visit_context = state.get("visit_context", {})
+    _DAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+    visit_parts = []
+    if visit_context.get("target_date"):
+        d = visit_context["target_date"]
+        visit_parts.append(f"{d.strftime('%Y-%m-%d')}({_DAY_KR[d.weekday()]}요일)")
+    if visit_context.get("category"):
+        visit_parts.append(f"선호 카테고리: {visit_context['category']}")
+
+    weather_info = state.get("weather_info", {})
+    weather_context = ""
+    if weather_info and "error" not in weather_info:
+        cond = weather_info.get("condition", "")
+        temp = weather_info.get("temperature")
+        temp_str = f"{temp}°C" if temp is not None else "알수없음"
+        visit_parts.append(f"날씨: {cond} {temp_str}")
+        if cond in ["비", "눈"]:
+            weather_context = " → 실내 장소를 우선 추천하세요."
+        elif cond in ["맑음"] and temp is not None and float(temp) >= 25:
+            weather_context = " → 더운 날씨이므로 에어컨이 있는 실내 또는 시원한 장소를 우선하세요."
+        elif cond in ["맑음"] and temp is not None and float(temp) <= 5:
+            weather_context = " → 추운 날씨이므로 따뜻한 실내 장소를 우선하세요."
+
+    visit_line = f"\n방문 조건: {', '.join(visit_parts)}{weather_context}\n" if visit_parts else ""
+
     json_format = (
         '{"places": [{"place_id": 정수}], '
         '"summary": "선택된 장소들을 왜 이 사용자에게 추천하는지 실질적인 이유를 2-3문장으로 설명"}'
     )
     prompt = (
-        f'사용자 검색어: "{question}"\n\n'
+        f'사용자 검색어: "{question}"\n'
+        f"{visit_line}\n"
         f"다음은 조건에 맞는 장소 목록입니다:\n{context}\n\n"
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
-        f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 공통된 특징과 실질적인 이유를 summary에 2-3문장으로 작성하세요.\n"
+        f"선호 카테고리와 날씨 조건도 함께 고려하세요. "
+        f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 카테고리·날씨 등 반영된 요소를 포함해 summary에 2-3문장으로 작성하세요.\n"
         f"순서 규칙: '[핵심 아이템 직접 보유]' 표시 장소를 최우선으로, '[핵심 키워드 포함]' 표시 장소를 그 다음 순위로 places 배열에 배치하세요. "
         f"해당 표시가 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
@@ -304,21 +335,30 @@ _graph = _build_graph()
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def run_rag(keyword: str, valid_ids: list[int]) -> dict:
+def run_rag(
+    keyword: str,
+    valid_ids: list[int],
+    weather_info: dict | None = None,
+    visit_context: dict | None = None,
+) -> dict:
     """
     MySQL 1차 필터 결과(valid_ids)를 받아 RAG 파이프라인 실행.
-    반환: {"places": [{"place_id", "category", "tags", "summary", "similarity"}, ...], "ai_summary": "..."}
+    weather_info: {"temperature": float, "condition": str} — 없으면 None
+    visit_context: {"target_date": date, "target_time": time, "category": str} — 없으면 None
+    반환: {"places": [{"place_id", "category", "tags", "similarity"}, ...], "ai_summary": "..."}
     """
     if not keyword or not valid_ids:
         return {"places": [], "ai_summary": ""}
 
     initial: PlaceRAGState = {
-        "keyword"   : keyword,
-        "question"  : keyword,
-        "valid_ids" : valid_ids,
-        "candidates": [],
-        "results"   : [],
-        "ai_summary": "",
+        "keyword"      : keyword,
+        "question"     : keyword,
+        "valid_ids"    : valid_ids,
+        "candidates"   : [],
+        "results"      : [],
+        "ai_summary"   : "",
+        "weather_info" : weather_info or {},
+        "visit_context": visit_context or {},
     }
 
     _INTERNAL_KEYS = {"exact_match", "summary"}
