@@ -24,12 +24,13 @@ def attach_place_info(rag_places: list[dict], db: Session) -> list[dict]:
     for p in rag_places:
         info = info_map.get(p["place_id"], {})
         result.append({
-            "place_id" : p["place_id"],
-            "name"     : info.get("name"),
-            "category" : p["category"],
-            "tags"     : p["tags"],
+            "place_id"  : p["place_id"],
+            "name"      : info.get("name"),
+            "category"  : p["category"],
+            "tags"      : p["tags"],
             "similarity": p["similarity"],
-            "image"    : info.get("image"),
+            "image"     : info.get("image"),
+            "match_type": p.get("match_type", "curated"),
         })
     return result
 
@@ -62,7 +63,7 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
 
         # 방문 날짜 필터
         if request.target_date:
-            target_day = request.target_date.weekday() + 1
+            target_day = request.target_date.weekday()
             query = query.filter(
                 OperatingHour.day_of_week == target_day, OperatingHour.is_closed == False
             )

@@ -37,28 +37,6 @@ EMBED_MODEL     = "text-embedding-3-small"
 CHAT_MODEL      = "gpt-4o-mini"
 N_CANDIDATES    = 20
 
-# 한국어 조사·어미 (긴 것부터 먼저 매칭)
-_KO_ENDINGS = [
-    "으로부터", "로부터", "에서부터", "고싶어요", "고싶어", "고싶다",
-    "에서", "으로", "로", "에게서", "한테서", "에게", "한테",
-    "에", "을", "를", "이", "가", "은", "는", "과", "와",
-    "도", "만", "까지", "부터", "처럼", "같이",
-]
-
-
-def _extract_item_tokens(keyword: str) -> list[str]:
-    """키워드에서 조사/어미를 제거한 핵심 토큰(2자 이상)을 추출."""
-    result = []
-    for t in keyword.replace(",", " ").split():
-        stemmed = t
-        for ending in _KO_ENDINGS:
-            if t.endswith(ending) and len(t) - len(ending) >= 2:
-                stemmed = t[:-len(ending)]
-                break
-        if len(stemmed) >= 2:
-            result.append(stemmed)
-    return list(dict.fromkeys(result))
-
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
 _openai: OpenAI | None = None
@@ -74,39 +52,80 @@ def _client() -> OpenAI:
 # ── GraphState ────────────────────────────────────────────────────────────────
 
 class PlaceRAGState(TypedDict):
-    keyword      : str         # 원본 사용자 입력 (불변)
-    question     : str         # rewrite 이후 최적화된 검색 쿼리
-    valid_ids    : list[int]   # MySQL 1차 필터 결과 (입력으로 주입)
-    candidates   : list[dict]  # ChromaDB retrieve 결과 (상위 N개)
-    results      : list[dict]  # 최종 추천 결과
-    ai_summary   : str         # 전체 추천 결과에 대한 AI 요약
-    weather_info : dict        # 날씨 정보 (temperature, condition) — 없으면 {}
-    visit_context: dict        # 방문 조건 (target_date, target_time, category) — 없으면 {}
+    keyword            : str        # 원본 사용자 입력 (불변)
+    question           : str        # rewrite 이후 최적화된 검색 쿼리
+    primary_keywords   : list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
+    secondary_keywords : list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
+    valid_ids          : list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
+    candidates         : list[dict] # ChromaDB retrieve 결과 (상위 N개)
+    results            : list[dict] # 최종 추천 결과
+    ai_summary         : str        # 전체 추천 결과에 대한 AI 요약
+    weather_info       : dict       # 날씨 정보 (temperature, condition) — 없으면 {}
+    visit_context      : dict       # 방문 조건 (target_date, target_time, category) — 없으면 {}
 
 
 # ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
 
-_REWRITE_SYSTEM = """당신은 장소 추천 검색 전문가입니다.
-사용자의 자연어 질문을 벡터 검색에 최적화된 간결한 문장으로 재작성하세요.
+# 태그 목록 (DB Tags 테이블 기준 — 태그 추가 시 함께 갱신)
+_AVAILABLE_TAGS = (
+    "COMMON: 데이트, 소개팅, 친목/모임, 단체, 기념일, 가성비, 뷰맛집, 로컬맛집, "
+    "인스타감성, 야외/테라스, 이색체험, 반려동물동반, 조용한, 활기찬, 아늑한, "
+    "로맨틱한, 힙한/트렌디, 고급스러운, 레트로/빈티지\n"
+    "CAFE: 혼카, 공부/독서\n"
+    "RESTAURANT: 한식, 양식, 일식, 중식, 분식, 주점/안주, 뷔페, 혼밥, 가족외식\n"
+    "ATTRACTION: 자연/풍경, 역사/유적, 문화/전시, 테마파크/놀이, 시장/쇼핑, "
+    "아이와함께, 부모님과, 연인데이트, 나홀로여행, 우정여행, 학습/체험, "
+    "야경명소, 인생샷/포토존, 산책, 힐링/휴식, 액티비티, 로컬감성, 등산/트레킹, "
+    "고즈넉한, 여유로운, 이색적인, 신비로운, 깔끔한/현대적인"
+)
 
-재작성 시 아래 요소를 추출하여 명시적으로 포함하세요.
-- 장소 유형 (카페, 식당, 공원, 박물관, 전망대, 시장, 테마파크 등)
-- 방문 목적 (공부, 식사, 데이트, 모임, 산책, 관람, 체험, 야경 감상, 등산 등)
-- 동반자 유형 (혼자, 친구, 커플, 가족, 아이, 부모님 등)
-- 분위기·조건 키워드 (조용한, 넓은, 뷰가 좋은, 고즈넉한, 활기찬, 이색적인, 역사적인, 자연 속 등)
-- 관광 유형 — 관광지 검색 시 해당하는 유형 (자연/풍경, 역사/유적, 문화/전시, 테마파크/놀이, 시장/쇼핑)
-- 가격대 (가성비, 합리적, 프리미엄 등)
+_REWRITE_SYSTEM = f"""당신은 장소 추천 검색 전문가입니다.
+사용자의 자연어 질문을 분석하여 아래 JSON 형식으로 응답하세요.
 
-규칙:
-- 한 문장으로만 출력하세요.
-- 설명이나 부연 없이 재작성된 질문만 출력하세요.
-- 원래 질문의 의도를 유지하세요."""
+{{
+  "question": "벡터 검색에 최적화된 한 문장",
+  "primary_keywords": ["사용자가 가장 원하는 핵심 아이템 — 반드시 있어야 하는 것"],
+  "secondary_keywords": ["부가 메뉴·음식·음료 또는 문맥에 맞는 태그명"]
+}}
+
+question 작성 규칙:
+- 장소 유형 (카페, 식당, 공원, 박물관 등), 방문 목적, 동반자 유형, 분위기 키워드 포함
+- 관광지 검색 시 유형 (자연/풍경, 역사/유적, 문화/전시 등) 명시
+- 가격대 언급 시 (가성비, 프리미엄 등) 포함
+- 그룹 내 식이 제한(채식, 알레르기 등)이 있는 경우 "채식과 육류를 함께 제공하는" 같이 수용 범위를 명시
+- 한 문장으로만 작성
+
+primary_keywords 작성 규칙:
+- 사용자가 이 검색을 하는 핵심 이유 — 반드시 충족돼야 하는 것
+- 특정 메뉴·음식·경험(브런치, 카이막 등) 또는 available_tags 중 검색의 주목적인 것(소개팅, 공부/독서 등) 포함 가능
+- 그룹 내 식이 제한이 있는 경우, 가장 제약이 강한 조건(채식주의자, 알레르기 등)을 primary로 — 그 조건을 못 맞추면 선택지가 없기 때문
+- 예: "카이막에 도전하고 싶은데 커피도 맛있는 카페" → ["카이막"]
+- 예: "소개팅 장소, 대화 이어지면 브런치도 먹고 싶어" → ["소개팅", "브런치"]
+- 예: "카공하기 좋은 조용한 카페" → ["공부/독서"]  (available_tags에서 핵심 목적)
+- 예: "채식주의자 + 고기 원하는 사람 혼재" → ["채식"] (채식 메뉴 보유가 핵심 제약)
+- 단순 분위기·장소 유형은 제외 (조용한, 아늑한 등은 secondary로)
+- 없으면 빈 배열 []
+
+secondary_keywords 작성 규칙:
+- ① primary 외에 함께 언급된 구체적 메뉴·음식·음료
+- ② 아래 available_tags 중 사용자의 문맥(분위기·동반자)과 겹치는 태그명 (primary에 없는 것)
+- ①②를 합쳐서 secondary_keywords 배열에 담음
+- 그룹 내 식이 요구가 서로 다른 경우(채식+고기, 알레르기+일반식 혼재 등), "뷔페"를 secondary에 추가 — 각자 선택 가능해 모두를 커버할 수 있기 때문
+- 예: "여자친구랑 카이막과 커피가 맛있는 카페" → ["커피", "데이트", "로맨틱한", "아늑한"]
+- 예: "소개팅, 브런치 가능한 카페, 너무 비싸면 부담" → ["아늑한", "가성비"]
+- 예: "카공하기 좋은 조용한 카페" → ["혼카", "조용한"]
+- 예: "채식주의자 + 고기 원하는 사람 혼재 회식" → ["뷔페", "친목/모임", "단체"]
+- 태그는 반드시 아래 available_tags 목록에서만 선택 (목록에 없는 단어 생성 금지)
+- 없으면 빈 배열 []
+
+available_tags:
+{_AVAILABLE_TAGS}"""
 
 
 # ── 노드 ─────────────────────────────────────────────────────────────────────
 
 def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
-    """구어체 키워드 → 벡터 검색 최적화 문장"""
+    """구어체 키워드 → 벡터 검색 최적화 문장 + 핵심 아이템 키워드 추출"""
     keyword = state["keyword"]
     resp = _client().chat.completions.create(
         model=CHAT_MODEL,
@@ -115,14 +134,17 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
             {"role": "user",   "content": keyword},
         ],
         temperature=0,
+        response_format={"type": "json_object"},
     )
-    question = resp.choices[0].message.content.strip()
-    return {"question": question}
+    raw                = json.loads(resp.choices[0].message.content)
+    question           = raw.get("question", keyword).strip()
+    primary_keywords   = raw.get("primary_keywords", [])
+    secondary_keywords = raw.get("secondary_keywords", [])
+    return {"question": question, "primary_keywords": primary_keywords, "secondary_keywords": secondary_keywords}
 
 
 def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     """ChromaDB 시맨틱 검색 + 아이템 텍스트 직접 검색 (valid_ids 범위 내)"""
-    keyword   = state["keyword"]
     question  = state["question"]
     valid_ids = state["valid_ids"]
 
@@ -138,36 +160,52 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     collection = get_chroma_client().get_collection(name=COLLECTION_NAME)
     where_ids  = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
 
-    def _to_candidate(m: dict, doc: str, dist: float, exact: bool) -> dict:
+    def _to_candidate(m: dict, doc: str, dist: float,
+                       matched_primary: int = 0, total_primary: int = 0,
+                       matched_secondary: int = 0) -> dict:
         return {
-            "place_id"   : int(m["place_id"]),
-            "category"   : m.get("category", ""),
-            "tags"       : [t for t in m.get("tags", "").split(",") if t],
-            "summary"    : doc,
-            "similarity" : round(1 - dist, 4),
-            "exact_match": exact,
+            "place_id"        : int(m["place_id"]),
+            "category"        : m.get("category", ""),
+            "tags"            : [t for t in m.get("tags", "").split(",") if t],
+            "summary"         : doc,
+            "similarity"      : round(1 - dist, 4),
+            "matched_primary" : matched_primary,
+            "total_primary"   : total_primary,
+            "matched_secondary": matched_secondary,
         }
 
-    # 1) 핵심 토큰으로 문서 직접 검색 (exact match)
-    item_tokens = _extract_item_tokens(keyword)
-    exact_map: dict[int, dict] = {}
-    for token in item_tokens:
-        try:
-            res = collection.query(
-                query_embeddings=[embedding],
-                n_results=min(10, len(valid_ids)),
-                where=where_ids,
-                where_document={"$contains": token},
-                include=["metadatas", "documents", "distances"],
-            )
-            for m, doc, dist in zip(
-                res["metadatas"][0], res["documents"][0], res["distances"][0]
-            ):
-                pid = int(m["place_id"])
-                if pid not in exact_map:
-                    exact_map[pid] = _to_candidate(m, doc, dist, exact=True)
-        except Exception:
-            pass
+    def _search_keywords(keywords: list[str], match_map: dict[int, set[str]]):
+        """키워드 목록으로 ChromaDB 텍스트 검색 — match_map에 매칭 토큰 누적"""
+        for kw in keywords:
+            try:
+                res = collection.query(
+                    query_embeddings=[embedding],
+                    n_results=min(10, len(valid_ids)),
+                    where=where_ids,
+                    where_document={"$contains": kw},
+                    include=["metadatas", "documents", "distances"],
+                )
+                for m, doc, dist in zip(
+                    res["metadatas"][0], res["documents"][0], res["distances"][0]
+                ):
+                    pid = int(m["place_id"])
+                    match_map.setdefault(pid, set()).add(kw)
+                    if pid not in token_meta_map:
+                        token_meta_map[pid] = (m, doc, dist)
+            except Exception:
+                pass
+
+    # 1) primary / secondary 키워드별 텍스트 직접 검색
+    primary_kws   = state.get("primary_keywords") or []
+    secondary_kws = state.get("secondary_keywords") or []
+    total_primary = len(primary_kws)
+
+    primary_match  : dict[int, set[str]] = {}
+    secondary_match: dict[int, set[str]] = {}
+    token_meta_map : dict[int, tuple]    = {}  # place_id → (m, doc, dist) 최초 등장
+
+    _search_keywords(primary_kws,   primary_match)
+    _search_keywords(secondary_kws, secondary_match)
 
     # 2) 시맨틱 검색
     n_query = min(N_CANDIDATES, len(valid_ids))
@@ -178,7 +216,10 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
         include=["metadatas", "documents", "distances"],
     )
     semantic_list = [
-        _to_candidate(m, doc, dist, exact=int(m["place_id"]) in exact_map)
+        _to_candidate(m, doc, dist,
+                      matched_primary=len(primary_match.get(int(m["place_id"]), set())),
+                      total_primary=total_primary,
+                      matched_secondary=len(secondary_match.get(int(m["place_id"]), set())))
         for m, doc, dist in zip(
             results["metadatas"][0],
             results["documents"][0],
@@ -186,9 +227,17 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
         )
     ]
 
-    # 3) 병합: exact match 먼저, 이후 semantic (중복 제거)
-    seen       = set(exact_map.keys())
-    candidates = list(exact_map.values())
+    # 3) 병합: 텍스트 매칭 장소 먼저, 이후 시맨틱 전용 (중복 제거)
+    all_matched_pids = set(primary_match.keys()) | set(secondary_match.keys())
+    token_candidates = [
+        _to_candidate(m, doc, dist,
+                      matched_primary=len(primary_match.get(pid, set())),
+                      total_primary=total_primary,
+                      matched_secondary=len(secondary_match.get(pid, set())))
+        for pid, (m, doc, dist) in token_meta_map.items()
+    ]
+    seen       = set(all_matched_pids)
+    candidates = list(token_candidates)
     for p in semantic_list:
         if p["place_id"] not in seen:
             seen.add(p["place_id"])
@@ -199,31 +248,31 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
 
 def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     """LLM이 후보 중 최적 장소 선별 + 전체 추천 요약 생성"""
-    keyword    = state["keyword"]
-    question   = state["question"]
-    candidates = state["candidates"]
-    n_results  = 10
-
-    # exact_match(텍스트 직접 검색) → 키워드 포함 → 나머지 순으로 정렬
-    item_tokens = _extract_item_tokens(keyword)
+    question           = state["question"]
+    candidates         = state["candidates"]
+    primary_kws        = state.get("primary_keywords") or []
+    secondary_kws      = state.get("secondary_keywords") or []
+    n_results          = 10
 
     def _priority_level(p: dict) -> int:
-        if p.get("exact_match"):
+        mp = p.get("matched_primary", 0)
+        tp = p.get("total_primary", 0)
+        ms = p.get("matched_secondary", 0)
+        if tp > 0 and mp == tp:        # primary 전부 매칭 → exact
             return 0
-        summary_lower = p["summary"].lower()
-        if any(t.lower() in summary_lower for t in item_tokens):
+        if mp > 0 or ms > 0:           # 일부 매칭 → relevant
             return 1
-        return 2
+        return 2                       # 아무것도 없음 → curated
 
     sorted_candidates = sorted(candidates, key=_priority_level)
 
     def _label(p: dict) -> str:
         lvl = _priority_level(p)
         if lvl == 0:
-            return " [핵심 아이템 직접 보유]"
+            return " [EXACT: 검색 아이템 실제 보유]"
         if lvl == 1:
-            return " [핵심 키워드 포함]"
-        return ""
+            return " [RELEVANT: 키워드 언급됨]"
+        return " [CURATED: 취향 기반 선별]"
 
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
@@ -258,19 +307,34 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     visit_line = f"\n방문 조건: {', '.join(visit_parts)}{weather_context}\n" if visit_parts else ""
 
+    # primary/secondary 키워드를 프롬프트에 명시
+    primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
+    secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
+    kw_line = (
+        f"핵심 아이템(primary, 반드시 보유): {primary_str}\n"
+        f"부가 아이템(secondary, 있으면 좋음): {secondary_str}\n"
+    )
+
     json_format = (
         '{"places": [{"place_id": 정수}], '
         '"summary": "선택된 장소들을 왜 이 사용자에게 추천하는지 실질적인 이유를 2-3문장으로 설명"}'
     )
     prompt = (
         f'사용자 검색어: "{question}"\n'
+        f"{kw_line}"
         f"{visit_line}\n"
         f"다음은 조건에 맞는 장소 목록입니다:\n{context}\n\n"
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
-        f"선호 카테고리와 날씨 조건도 함께 고려하세요. "
-        f"선택된 장소들이 이 사용자의 검색 의도에 왜 적합한지 카테고리·날씨 등 반영된 요소를 포함해 summary에 2-3문장으로 작성하세요.\n"
-        f"순서 규칙: '[핵심 아이템 직접 보유]' 표시 장소를 최우선으로, '[핵심 키워드 포함]' 표시 장소를 그 다음 순위로 places 배열에 배치하세요. "
-        f"해당 표시가 없더라도 후보 중 가장 적합한 장소를 반드시 선택하세요.\n"
+        f"선호 카테고리와 날씨 조건도 함께 고려하세요.\n"
+        f"summary 작성 규칙:\n"
+        f"- [EXACT] 장소: primary 아이템({primary_str})이 리뷰에서 실제로 확인된 곳입니다. 보유 사실을 명확히 언급하세요.\n"
+        f"- [RELEVANT] 장소: primary({primary_str}) 보유 여부는 리뷰에서 확인되지 않았습니다. "
+        f"절대 보유한다고 단정하지 말고, '다양한 메뉴 구성으로 선택 가능성이 있습니다' 같은 가능성 표현을 쓰세요.\n"
+        f"- [CURATED] 장소: 아무 아이템도 없지만 사용자 태그·분위기에 맞게 선별된 곳입니다.\n"
+        f"위 구분을 지키면서 날씨·카테고리 등 반영 요소를 포함해 2-3문장으로 작성하세요.\n"
+        f"- 장소 이름은 절대 언급하지 마세요. 분위기·특징·추천 이유만 설명하세요.\n"
+        f"- 검색어에 식이 제한(채식, 알레르기 등)이 언급된 경우, 확인된 사실만 서술하고 불확실하면 '방문 전 확인 권장' 표현을 사용하세요.\n"
+        f"순서 규칙: [EXACT] → [RELEVANT] → [CURATED] 순으로 places 배열에 배치하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
 
@@ -351,23 +415,34 @@ def run_rag(
         return {"places": [], "ai_summary": ""}
 
     initial: PlaceRAGState = {
-        "keyword"      : keyword,
-        "question"     : keyword,
-        "valid_ids"    : valid_ids,
-        "candidates"   : [],
-        "results"      : [],
-        "ai_summary"   : "",
-        "weather_info" : weather_info or {},
-        "visit_context": visit_context or {},
+        "keyword"           : keyword,
+        "question"          : keyword,
+        "primary_keywords"  : [],
+        "secondary_keywords": [],
+        "valid_ids"         : valid_ids,
+        "candidates"        : [],
+        "results"           : [],
+        "ai_summary"        : "",
+        "weather_info"      : weather_info or {},
+        "visit_context"     : visit_context or {},
     }
 
-    _INTERNAL_KEYS = {"exact_match", "summary"}
+    _INTERNAL_KEYS = {"matched_primary", "total_primary", "matched_secondary", "summary"}
 
     final  = _graph.invoke(initial)
-    places = [
-        {k: v for k, v in p.items() if k not in _INTERNAL_KEYS}
-        for p in final["results"]
-    ]
+    places = []
+    for p in final["results"]:
+        place = {k: v for k, v in p.items() if k not in _INTERNAL_KEYS}
+        mp = p.get("matched_primary", 0)
+        tp = p.get("total_primary", 0)
+        ms = p.get("matched_secondary", 0)
+        if tp > 0 and mp == tp:
+            place["match_type"] = "exact"
+        elif mp > 0 or ms > 0:
+            place["match_type"] = "relevant"
+        else:
+            place["match_type"] = "curated"
+        places.append(place)
     return {"places": places, "ai_summary": final["ai_summary"]}
 
 
@@ -387,20 +462,45 @@ if __name__ == "__main__":
     from services.place_service import get_filtered_place_ids
     from schemas.request import PlaceSearchRequest
 
-    def _run_test(keyword: str, category: str | None = None, regions: list[str] | None = None):
+    def _run_test(
+        keyword: str,
+        category: str | None = None,
+        regions: list[str] | None = None,
+        tag_ids: list[int] | None = None,
+        weather_info: dict | None = None,
+        visit_context: dict | None = None,
+    ):
         print(f"\n{'='*65}")
         print(f"  키워드  : {keyword}")
         print(f"  카테고리: {category or '전체'}")
         print(f"  지역    : {regions or '전체'}")
+        if tag_ids:
+            print(f"  선호태그: tag_ids={tag_ids}")
+        if weather_info:
+            print(f"  날씨    : {weather_info.get('condition')} {weather_info.get('temperature')}°C")
+        if visit_context:
+            _DAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
+            vc = visit_context
+            d = vc.get("target_date")
+            from datetime import date as _date
+            today = _date.today()
+            if d:
+                diff = (d - today).days
+                label = {0: "오늘", 1: "내일", 2: "모레"}.get(diff, f"{diff}일 후" if diff > 0 else f"{-diff}일 전")
+                print(f"  방문날짜: {d.strftime('%Y-%m-%d')}({_DAY_KR[d.weekday()]}요일) ← {label}")
         print(f"{'='*65}")
 
         db = SessionLocal()
         try:
             # ── MySQL 1차 필터 ──────────────────────────────────────────
+            vc = visit_context or {}
             req = PlaceSearchRequest(
                 keyword=keyword,
                 category=category,
                 regions=regions or [],
+                tag_ids=tag_ids or [],
+                target_date=vc.get("target_date"),
+                target_time=vc.get("target_time"),
             )
             valid_ids = get_filtered_place_ids(db, req)
         finally:
@@ -418,11 +518,16 @@ if __name__ == "__main__":
 
         # 중간 상태를 출력하려면 그래프를 stream으로 실행
         initial: PlaceRAGState = {
-            "keyword"   : keyword,
-            "question"  : keyword,
-            "valid_ids" : valid_ids,
-            "candidates": [],
-            "results"   : [],
+            "keyword"           : keyword,
+            "question"          : keyword,
+            "primary_keywords"  : [],
+            "secondary_keywords": [],
+            "valid_ids"         : valid_ids,
+            "candidates"        : [],
+            "results"           : [],
+            "ai_summary"        : "",
+            "weather_info"      : weather_info or {},
+            "visit_context"     : visit_context or {},
         }
 
         state = initial.copy()
@@ -432,15 +537,27 @@ if __name__ == "__main__":
 
             if node_name == "rewrite":
                 print(f"\n  [rewrite]")
-                print(f"    원본  : {keyword}")
-                print(f"    재작성: {node_out.get('question', '')}")
+                print(f"    원본        : {keyword}")
+                print(f"    재작성      : {node_out.get('question', '')}")
+                print(f"    primary     : {node_out.get('primary_keywords', [])}")
+                print(f"    secondary   : {node_out.get('secondary_keywords', [])}")
                 state.update(node_out)
 
             elif node_name == "retrieve":
                 candidates = node_out.get("candidates", [])
                 print(f"\n  [retrieve] 후보 {len(candidates)}개")
                 for c in candidates:
-                    mark = " ★EXACT" if c.get("exact_match") else ""
+                    mp = c.get("matched_primary", 0)
+                    tp = c.get("total_primary", 0)
+                    ms = c.get("matched_secondary", 0)
+                    if tp > 0 and mp == tp:
+                        mark = f" ★EXACT(primary {mp}/{tp})"
+                    elif mp > 0:
+                        mark = f" ★RELEVANT(primary {mp}/{tp})"
+                    elif ms > 0:
+                        mark = f" ★RELEVANT(secondary)"
+                    else:
+                        mark = ""
                     print(f"    {c['place_id']} | {c['category']} | 유사도 {c['similarity']} | {c['tags']}{mark}")
                 state.update(node_out)
 
@@ -458,7 +575,16 @@ if __name__ == "__main__":
         print(f"\n{'─'*65}")
         print(f"최종 추천 {len(results)}개\n")
         for i, place in enumerate(results, 1):
-            print(f"  [{i}] place_id  : {place['place_id']}")
+            mp = place.get("matched_primary", 0)
+            tp = place.get("total_primary", 0)
+            ms = place.get("matched_secondary", 0)
+            if tp > 0 and mp == tp:
+                match_type = "exact"
+            elif mp > 0 or ms > 0:
+                match_type = "relevant"
+            else:
+                match_type = "curated"
+            print(f"  [{i}] place_id  : {place['place_id']}  [{match_type}]")
             print(f"      카테고리  : {place['category']}")
             print(f"      태그      : {place['tags']}")
             print(f"      유사도    : {place['similarity']}")
@@ -492,7 +618,71 @@ if __name__ == "__main__":
     #     category="cafe",
     # )
 
+    from datetime import date, time
+
+    # ── 기존 테스트 ───────────────────────────────────────────────────────────
+    # _run_test(
+    #     keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
+    #     category="cafe",
+    #     tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
+    #     weather_info={"condition": "맑음", "temperature": 22},
+    #     visit_context={"category": "카페", "target_date": date(2026, 5, 21)},
+    # )
+
+    # ── 꼬인 테스트 케이스 ────────────────────────────────────────────────────
+
+    # [1] 카공 — 조용함 vs 스페셜티 감성, 눈치 없이 오래 앉기
+    # _run_test(
+    #     keyword=(
+    #         "카공하러 가는 건데 진짜 집중은 잘 안 해도 돼. "
+    #         "근데 너무 시끄러우면 집중 안 된다는 핑계 못 대니까 적당히 조용했으면 하고, "
+    #         "커피는 산미 없는 거 마시고 싶은데 스페셜티 감성은 있으면 좋겠어. "
+    #         "아이스 아메리카노 한 잔으로 3-4시간 버텨도 눈치 안 줬으면."
+    #     ),
+    #     category="cafe",
+    #     tag_ids=[1, 2, 51, 55],     # 혼카, 공부/독서, 조용한, 힙한/트렌디
+    #     weather_info={"condition": "맑음", "temperature": 28},
+    #     visit_context={"category": "카페", "target_date": date(2026, 5, 22)},
+    # )
+
+    # [2] 팀 회식 — 채식주의자 + 해산물 알레르기 + 고기파 혼재
+    # _run_test(
+    #     keyword=(
+    #         "팀 회식인데 채식주의자 한 명, 해산물 알레르기 한 명, "
+    #         "나머지 여섯은 고기 실컷 먹고 싶어 하는 상황이야. "
+    #         "코스 요리처럼 격식 있는 건 싫고 회식 특유의 어색함 좀 깨줄 수 있는 분위기면 좋겠어."
+    #     ),
+    #     category="restaurant",
+    #     tag_ids=[41, 42, 52, 44, 5],  # 친목/모임, 단체, 활기찬, 가성비, 양식
+    # )
+
+    # [3] 소개팅 — 상대 모름, 가격 애매, 브런치 가능, 인스타 오버는 싫음
+    # _run_test(
+    #     keyword=(
+    #         "소개팅 장소 정해야 하는데 상대가 어떤 사람인지 하나도 몰라. "
+    #         "너무 비싸면 부담스럽고 너무 캐주얼하면 성의 없어 보이고. "
+    #         "대화 이어지면 밥도 먹을 수 있게 브런치 되는 곳이면 좋겠는데, "
+    #         "인스타 감성 넘치는 데는 좀 오글거려."
+    #     ),
+    #     category="cafe",
+    #     tag_ids=[40, 53, 44],         # 소개팅, 아늑한, 가성비
+    #     weather_info={"condition": "맑음", "temperature": 20},
+    #     visit_context={"category": "카페", "target_date": date(2026, 5, 24)},
+    # )
+
+    # [4] 야간 혼카 — 밤 10시, 혼자인데 외롭지 않은 애매한 분위기
     _run_test(
-        keyword="딸기라떼가 맛있는 곳을 추천해줘",
+        keyword=(
+            "밤 10시 넘어서 혼자 가도 자연스러운 카페인데, "
+            "너무 조용해서 내 숨소리 들리는 분위기는 싫어. "
+            "디저트 하나 시켜놓고 멍 때릴 수 있는데, 혼자인 게 눈에 띄지 않는 곳."
+        ),
         category="cafe",
+        tag_ids=[1, 55, 52],          # 혼카, 힙한/트렌디, 활기찬
+        weather_info={"condition": "맑음", "temperature": 16},
+        visit_context={
+            "category": "카페",
+            "target_date": date(2026, 5, 20),
+            "target_time": time(22, 0),
+        },
     )
