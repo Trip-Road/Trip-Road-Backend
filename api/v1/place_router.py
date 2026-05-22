@@ -1,7 +1,8 @@
+from datetime import date as date_class
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session, joinedload
 
@@ -14,6 +15,22 @@ from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse, PlaceDetailResponse
 from services.place_service import attach_place_info, get_filtered_place_ids, get_place_detail_info
 from services.rag_graph import run_rag
+from services.weather_service import get_current_weather, get_forecast_weather, get_mid_term_weather
+
+
+def _weather_to_keyword(weather_info: dict) -> str:
+    """날씨 정보를 RAG 검색용 키워드로 변환"""
+    cond = weather_info.get("condition", "")
+    temp = weather_info.get("temperature")
+    if cond in ["비", "눈"]:
+        return f"{cond}오는 날 실내에서 즐길 수 있는 장소"
+    if cond == "맑음":
+        if temp is not None and float(temp) >= 25:
+            return "더운 날씨 에어컨 시원한 실내 추천"
+        if temp is not None and float(temp) <= 5:
+            return "추운 날씨 따뜻한 실내 카페 추천"
+        return "맑은 날 야외 나들이 추천 장소"
+    return "오늘 날씨에 어울리는 대구 추천 장소"
 
 router = APIRouter()
 
@@ -82,11 +99,113 @@ def search_places(
             "places": [{"place_id": pid} for pid in valid_place_ids[:10]],
         }
 
+    # 날씨 정보 조회 (target_date + target_time 둘 다 있을 때만)
+    weather_info = None
+    if request.target_date and request.target_time:
+        region = request.regions[0] if request.regions else "대구전체"
+        days_diff = (request.target_date - date_class.today()).days
+        try:
+            if days_diff == 0:
+                weather_info = get_current_weather(region)
+            elif 1 <= days_diff <= 2:
+                weather_info = get_forecast_weather(region, request.target_date, request.target_time)
+            elif 3 <= days_diff <= 10:
+                weather_info = get_mid_term_weather(request.target_date, request.target_time)
+        except Exception:
+            weather_info = None
+
     # 2차: Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
-    result = run_rag(keyword=request.keyword, valid_ids=valid_place_ids)
+    visit_context = {
+        "target_date": request.target_date,
+        "target_time": request.target_time,
+        "category"   : request.category,
+    }
+    result = run_rag(
+        keyword=request.keyword,
+        valid_ids=valid_place_ids,
+        weather_info=weather_info,
+        visit_context=visit_context,
+    )
 
     places = attach_place_info(result["places"], db)
     return {"message": "검색 완료", "places": places, "ai_summary": result["ai_summary"]}
+
+
+@router.get("/recommendations")
+def get_recommendations(
+    category: Optional[str] = Query(default=None, description="카페 | 음식점 | 관광명소"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    메인화면 추천 API
+    - 사용자 최근 검색어 + 선호 태그 + 실시간 날씨를 종합하여 장소 추천
+    - keyword 없고 날씨도 없으면 선호 태그 필터 결과만 반환
+    """
+    # 선호 태그 ID 목록
+    tag_ids = [tag.tag_id for tag in current_user.preferred_tags]
+
+    # 최근 검색어
+    latest_history = (
+        db.query(SearchHistory)
+        .filter(SearchHistory.user_id == current_user.user_id)
+        .order_by(desc(SearchHistory.created_at))
+        .first()
+    )
+    keyword = latest_history.keyword if latest_history else None
+
+    # 실시간 날씨
+    try:
+        weather_info = get_current_weather("대구전체")
+        if "error" in weather_info:
+            weather_info = None
+    except Exception:
+        weather_info = None
+
+    # 1차 필터링 (선호 태그 + 카테고리)
+    filter_request = PlaceSearchRequest(
+        category=category,
+        tag_ids=tag_ids if tag_ids else None,
+    )
+    valid_place_ids = get_filtered_place_ids(db, filter_request)
+
+    if not valid_place_ids:
+        return {"message": "조건에 맞는 장소가 없습니다.", "places": [], "ai_summary": ""}
+
+    # keyword 없고 날씨도 없으면 → 태그 필터 결과만 반환
+    if not keyword and not weather_info:
+        places_raw = (
+            db.query(Place)
+            .options(joinedload(Place.tags))
+            .filter(Place.place_id.in_(valid_place_ids[:10]))
+            .all()
+        )
+        places = [
+            {
+                "place_id": p.place_id,
+                "name": p.name,
+                "category": p.category,
+                "tags": [t.tag_name for t in p.tags],
+                "image": p.image_url,
+            }
+            for p in places_raw
+        ]
+        return {"message": "추천 완료", "places": places, "ai_summary": ""}
+
+    # keyword 없고 날씨만 있으면 → 날씨 기반 키워드 자동 생성
+    if not keyword and weather_info:
+        keyword = _weather_to_keyword(weather_info)
+
+    visit_context = {"category": category}
+    result = run_rag(
+        keyword=keyword,
+        valid_ids=valid_place_ids,
+        weather_info=weather_info,
+        visit_context=visit_context,
+    )
+
+    places = attach_place_info(result["places"], db)
+    return {"message": "추천 완료", "places": places, "ai_summary": result["ai_summary"]}
 
 
 @router.get("/{place_id}", response_model=PlaceDetailResponse)
