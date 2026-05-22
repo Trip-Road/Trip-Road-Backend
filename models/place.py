@@ -21,7 +21,7 @@ class Place(Base):
     phone: Mapped[Optional[str]] = mapped_column(String(50), comment="전화번호")
     latitude: Mapped[Optional[float]] = mapped_column(Numeric(10, 8), comment="위도")
     longitude: Mapped[Optional[float]] = mapped_column(Numeric(11, 8), comment="경도")
-    image_url: Mapped[Optional[str]] = mapped_column(String(255), comment="장소 이미지 URL")
+    image_url: Mapped[Optional[str]] = mapped_column(Text, comment="장소 이미지 URL")
     review_summary: Mapped[Optional[str]] = mapped_column(Text, comment="AI 리뷰 요약")
 
     # Relationships
