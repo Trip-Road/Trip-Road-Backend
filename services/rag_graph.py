@@ -633,6 +633,28 @@ if __name__ == "__main__":
         if name_match_ids:
             print(f"  이름 매칭: place_ids={name_match_ids}")
 
+        # ── 이름 매칭 시 RAG 건너뜀 (place_router.py search_places 동일 로직) ──
+        if name_match_ids:
+            print(f"\n[NAME_MATCH] 이름 직접 매칭 → RAG 없이 DB에서 즉시 반환")
+            db2 = SessionLocal()
+            try:
+                from models.place import Place as _Place
+                from sqlalchemy.orm import joinedload as _jl
+                places_raw = db2.query(_Place).options(_jl(_Place.tags)).filter(
+                    _Place.place_id.in_(name_match_ids)
+                ).all()
+            finally:
+                db2.close()
+            print(f"\n{'─'*65}")
+            print(f"최종 추천 {len(places_raw)}개  [name_match]\n")
+            for i, p in enumerate(places_raw, 1):
+                print(f"  [{i}] place_id  : {p.place_id}  [name_match]")
+                print(f"      이름      : {p.name}")
+                print(f"      카테고리  : {p.category}")
+                print(f"      태그      : {[t.tag_name for t in p.tags]}")
+                print()
+            return
+
         # ── RAG 파이프라인 ───────────────────────────────────────────────
         print(f"\n[2~4단계] RAG 파이프라인 실행 중 ...")
 
@@ -835,15 +857,26 @@ if __name__ == "__main__":
     # )
 
    
+    # _run_test(
+    #     keyword=(
+    #         "동대구역 근처 밤 9시 넘어서 운영하는 맛집"
+    #     ),
+    #     category="restaurant",
+    #     tag_ids=[44],
+    #     weather_info={"condition": "맑음", "temperature": 16},
+    #     visit_context={
+    #         "target_date": date(2026, 5, 25),
+    #         "target_time": time(21, 0),
+    #     },
+    # )
+
+    # [이름 검색] 가게 이름 직접 검색 → NAME_MATCH 1순위 배치 확인
+    # _run_test(
+    #     keyword="요술밥상",
+    #     category="restaurant",
+    # )
+
     _run_test(
-        keyword=(
-            "동대구역 근처 밤 9시 넘어서 운영하는 맛집"
-        ),
+        keyword="요술밥상과 비슷한 분위기의 식당",
         category="restaurant",
-        tag_ids=[44],          
-        weather_info={"condition": "맑음", "temperature": 16},
-        visit_context={
-            "target_date": date(2026, 5, 25),
-            "target_time": time(21, 0),
-        },
     )
