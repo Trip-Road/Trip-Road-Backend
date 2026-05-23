@@ -111,8 +111,6 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
         delta_lat = r / 111.0
         delta_lng = r / (111.0 * math.cos(math.radians(request.ref_lat)))
         query = query.filter(
-            Place.latitude.isnot(None),
-            Place.longitude.isnot(None),
             Place.latitude.between(request.ref_lat - delta_lat, request.ref_lat + delta_lat),
             Place.longitude.between(request.ref_lng - delta_lng, request.ref_lng + delta_lng),
         )

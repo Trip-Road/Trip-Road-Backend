@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date as date_class
 from datetime import datetime
 from typing import List, Optional
@@ -63,29 +64,51 @@ def search_places(
         if coords:
             request = request.model_copy(update={"ref_lat": coords[0], "ref_lng": coords[1]})
 
-    # 1차 필터링: 조건에 맞는 place_id 추출
-    valid_place_ids = get_filtered_place_ids(db, request)
+    # 날씨 fetch 함수 (스레드에서 실행)
+    def _fetch_weather():
+        if not (request.target_date and request.target_time):
+            return None
+        region = request.regions[0] if request.regions else "대구전체"
+        days_diff = (request.target_date - date_class.today()).days
+        try:
+            if days_diff == 0:
+                return get_current_weather(region)
+            elif 1 <= days_diff <= 2:
+                return get_forecast_weather(region, request.target_date, request.target_time)
+            elif 3 <= days_diff <= 10:
+                return get_mid_term_weather(request.target_date, request.target_time)
+        except Exception:
+            pass
+        return None
+
+    # 1차 필터링(MySQL) + 날씨 조회 병렬 실행
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        weather_future  = executor.submit(_fetch_weather)
+        valid_place_ids = get_filtered_place_ids(db, request)
+        weather_info    = weather_future.result()
 
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": []}
 
-    # 검색어 저장 및 관리
-    if request.keyword:
-        existing_history = (
-            db.query(SearchHistory)
-            .filter(
-                SearchHistory.user_id == current_user.user_id,
-                SearchHistory.keyword == request.keyword,
-            )
-            .first()
-        )
+    if not request.keyword:
+        return {
+            "message": "검색 완료",
+            "places": [{"place_id": pid} for pid in valid_place_ids[:10]],
+        }
 
+    # 검색어 저장 및 관리
+    existing_history = (
+        db.query(SearchHistory)
+        .filter(
+            SearchHistory.user_id == current_user.user_id,
+            SearchHistory.keyword == request.keyword,
+        )
+        .first()
+    )
     if existing_history:
         existing_history.created_at = datetime.now()
     else:
-        new_history = SearchHistory(user_id=current_user.user_id, keyword=request.keyword)
-        db.add(new_history)
-
+        db.add(SearchHistory(user_id=current_user.user_id, keyword=request.keyword))
     db.commit()
 
     user_histories = (
@@ -94,32 +117,10 @@ def search_places(
         .order_by(desc(SearchHistory.created_at))
         .all()
     )
-
     if len(user_histories) > 10:
         for old_history in user_histories[10:]:
             db.delete(old_history)
         db.commit()
-
-    if not request.keyword:
-        return {
-            "message": "검색 완료",
-            "places": [{"place_id": pid} for pid in valid_place_ids[:10]],
-        }
-
-    # 날씨 정보 조회 (target_date + target_time 둘 다 있을 때만)
-    weather_info = None
-    if request.target_date and request.target_time:
-        region = request.regions[0] if request.regions else "대구전체"
-        days_diff = (request.target_date - date_class.today()).days
-        try:
-            if days_diff == 0:
-                weather_info = get_current_weather(region)
-            elif 1 <= days_diff <= 2:
-                weather_info = get_forecast_weather(region, request.target_date, request.target_time)
-            elif 3 <= days_diff <= 10:
-                weather_info = get_mid_term_weather(request.target_date, request.target_time)
-        except Exception:
-            weather_info = None
 
     # 2차: Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
     visit_context = {

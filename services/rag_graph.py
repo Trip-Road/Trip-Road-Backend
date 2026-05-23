@@ -32,10 +32,13 @@ from db.chroma import get_chroma_client
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 
-COLLECTION_NAME = "place_reviews"
-EMBED_MODEL     = "text-embedding-3-small"
-CHAT_MODEL      = "gpt-4o-mini"
+COLLECTION_NAME      = "place_reviews"
+EMBED_MODEL          = "text-embedding-3-small"
+CHAT_MODEL           = "gpt-4o-mini"
 N_CANDIDATES    = 20
+
+# ── rewrite 결과 캐시 (keyword → {question, primary, secondary, embedding}) ──
+_rewrite_cache: dict[str, dict] = {}
 
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
@@ -56,6 +59,7 @@ class PlaceRAGState(TypedDict):
     question           : str        # rewrite 이후 최적화된 검색 쿼리
     primary_keywords   : list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
     secondary_keywords : list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
+    embedding          : list[float] # rewrite와 병렬로 미리 계산된 임베딩
     valid_ids          : list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
     candidates         : list[dict] # ChromaDB retrieve 결과 (상위 N개)
     results            : list[dict] # 최종 추천 결과
@@ -125,22 +129,53 @@ available_tags:
 # ── 노드 ─────────────────────────────────────────────────────────────────────
 
 def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
-    """구어체 키워드 → 벡터 검색 최적화 문장 + 핵심 아이템 키워드 추출"""
+    """구어체 키워드 → 벡터 검색 최적화 문장 + 핵심 아이템 키워드 추출
+    - 캐시: 동일 키워드 재검색 시 LLM 호출 스킵
+    - embedding은 rewrite LLM 호출과 병렬로 원본 키워드로 미리 계산"""
+    from concurrent.futures import ThreadPoolExecutor as _TPE
     keyword = state["keyword"]
-    resp = _client().chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": _REWRITE_SYSTEM},
-            {"role": "user",   "content": keyword},
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
+
+    cached = _rewrite_cache.get(keyword)
+    if cached:
+        return cached
+
+    def _do_rewrite():
+        return _client().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "user",   "content": keyword},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+
+    def _do_embed():
+        return (
+            _client().embeddings
+            .create(model=EMBED_MODEL, input=[keyword])
+            .data[0].embedding
+        )
+
+    with _TPE(max_workers=2) as executor:
+        rewrite_future = executor.submit(_do_rewrite)
+        embed_future   = executor.submit(_do_embed)
+        resp      = rewrite_future.result()
+        embedding = embed_future.result()
+
     raw                = json.loads(resp.choices[0].message.content)
     question           = raw.get("question", keyword).strip()
     primary_keywords   = raw.get("primary_keywords", [])
     secondary_keywords = raw.get("secondary_keywords", [])
-    return {"question": question, "primary_keywords": primary_keywords, "secondary_keywords": secondary_keywords}
+
+    result = {
+        "question"          : question,
+        "primary_keywords"  : primary_keywords,
+        "secondary_keywords": secondary_keywords,
+        "embedding"         : embedding,
+    }
+    _rewrite_cache[keyword] = result
+    return result
 
 
 def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
@@ -151,11 +186,13 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     if not valid_ids:
         return {"candidates": []}
 
-    embedding = (
-        _client().embeddings
-        .create(model=EMBED_MODEL, input=[question])
-        .data[0].embedding
-    )
+    embedding = state.get("embedding") or []
+    if not embedding:
+        embedding = (
+            _client().embeddings
+            .create(model=EMBED_MODEL, input=[question])
+            .data[0].embedding
+        )
 
     collection = get_chroma_client().get_collection(name=COLLECTION_NAME)
     where_ids  = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
@@ -202,7 +239,7 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
 
     primary_match  : dict[int, set[str]] = {}
     secondary_match: dict[int, set[str]] = {}
-    token_meta_map : dict[int, tuple]    = {}  # place_id → (m, doc, dist) 최초 등장
+    token_meta_map : dict[int, tuple]    = {}
 
     _search_keywords(primary_kws,   primary_match)
     _search_keywords(secondary_kws, secondary_match)
@@ -226,7 +263,6 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             results["distances"][0],
         )
     ]
-
     # 3) 병합: 텍스트 매칭 장소 먼저, 이후 시맨틱 전용 (중복 제거)
     all_matched_pids = set(primary_match.keys()) | set(secondary_match.keys())
     token_candidates = [
@@ -419,6 +455,7 @@ def run_rag(
         "question"          : keyword,
         "primary_keywords"  : [],
         "secondary_keywords": [],
+        "embedding"         : [],
         "valid_ids"         : valid_ids,
         "candidates"        : [],
         "results"           : [],
@@ -546,6 +583,7 @@ if __name__ == "__main__":
             "question"          : keyword,
             "primary_keywords"  : [],
             "secondary_keywords": [],
+            "embedding"         : [],
             "valid_ids"         : valid_ids,
             "candidates"        : [],
             "results"           : [],
@@ -650,14 +688,14 @@ if __name__ == "__main__":
         category="cafe",
         tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
         weather_info={"condition": "맑음", "temperature": 22},
-        visit_context={"category": "카페", "target_date": date(2026, 5, 21)},
+        visit_context={"category": "카페", "target_date": date(2026, 5, 27)},
+        regions=["중구"]
     )
 
     # [5] 
     # _run_test(
-    #     keyword="반월당 근처에 오늘 저녁 9시반에 회사 사람들이랑 갈 치킨집을 찾아줘",
+    #     keyword="반월당에 오늘 저녁 늦게 회사 사람들이랑 갈 치킨 전문점을 찾아줘, 맥주도 한잔 걸칠라고",
     #     category="restaurant",
-    #     radius_km=0.71,  # 대구역 반경 0.71km 내
     #     visit_context={
     #         "category": "식당",
     #         "target_date": date(2026, 5, 23),

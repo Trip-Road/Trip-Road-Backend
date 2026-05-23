@@ -33,6 +33,12 @@ class Place(Base):
         "FavoritePlace", back_populates="place", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        Index("idx_places_category", "category"),
+        Index("idx_places_region", "region"),
+        Index("idx_places_lat_lng", "latitude", "longitude"),
+    )
+
 
 class OperatingHour(Base):
     __tablename__ = "Operating_Hours"
@@ -51,4 +57,7 @@ class OperatingHour(Base):
 
     place: Mapped["Place"] = relationship("Place", back_populates="operating_hours")
 
-    __table_args__ = (Index("idx_operating_hours_day", "day_of_week", "is_closed"),)
+    __table_args__ = (
+        Index("idx_operating_hours_day", "day_of_week", "is_closed"),
+        Index("idx_oh_place_day_closed", "place_id", "day_of_week", "is_closed"),
+    )
