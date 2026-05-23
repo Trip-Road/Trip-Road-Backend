@@ -330,7 +330,6 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     candidates         = state["candidates"]
     primary_kws        = state.get("primary_keywords") or []
     secondary_kws      = state.get("secondary_keywords") or []
-    exclusion_kws      = state.get("exclusion_keywords") or []
     n_results          = 10
 
     def _priority_level(p: dict) -> int:
@@ -393,11 +392,9 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     # primary/secondary/exclusion 키워드를 프롬프트에 명시
     primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
     secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
-    exclusion_str = ", ".join(exclusion_kws) if exclusion_kws else "없음"
     kw_line = (
         f"핵심 아이템(primary, 반드시 보유): {primary_str}\n"
         f"부가 아이템(secondary, 있으면 좋음): {secondary_str}\n"
-        f"절대 제외(주력 메뉴·특색인 장소 선택 불가): {exclusion_str}\n"
     )
 
     json_format = (
@@ -412,14 +409,13 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
         f"선호 카테고리와 날씨 조건도 함께 고려하세요.\n"
         f"summary 작성 규칙:\n"
-        f"- [NAME_MATCH] 장소: 검색어와 이름이 직접 일치합니다. 절대 제외 조건과 충돌하지 않는 한 반드시 places 첫 번째에 포함하고, 장소 특징을 중심으로 서술하세요.\n"
+        f"- [NAME_MATCH] 장소: 검색어와 이름이 직접 일치합니다. 반드시 places 첫 번째에 포함하고, 장소 특징을 중심으로 서술하세요.\n"
         f"- [EXACT] 장소: primary 아이템({primary_str})이 리뷰에서 실제로 확인된 곳입니다. 보유 사실을 명확히 언급하세요.\n"
         f"- [RELEVANT] 장소: primary({primary_str}) 보유 여부는 리뷰에서 확인되지 않았습니다. "
         f"절대 보유한다고 단정하지 말고, '다양한 메뉴 구성으로 선택 가능성이 있습니다' 같은 가능성 표현을 쓰세요.\n"
         f"- [CURATED] 장소: 아무 아이템도 없지만 사용자 태그·분위기에 맞게 선별된 곳입니다.\n"
         f"위 구분을 지키면서 날씨·카테고리 등 반영 요소를 포함해 2-3문장으로 작성하세요.\n"
         f"- 장소 이름은 절대 언급하지 마세요. 분위기·특징·추천 이유만 설명하세요.\n"
-        f"- 검색어에 식이 제한(채식, 알레르기 등)이 언급된 경우, 확인된 사실만 서술하고 불확실하면 '방문 전 확인 권장' 표현을 사용하세요.\n"
         f"순서 규칙: [NAME_MATCH] → [EXACT] → [RELEVANT] → [CURATED] 순으로 places 배열에 배치하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
@@ -814,15 +810,15 @@ if __name__ == "__main__":
     # )
 
     # [2] 팀 회식 — 채식주의자 + 해산물 알레르기 + 고기파 혼재
-    # _run_test(
-    #     keyword=(
-    #         "팀 회식인데 채식주의자 한 명, 해산물 알레르기 한 명, "
-    #         "나머지 여섯은 고기 실컷 먹고 싶어 하는 상황이야. "
-    #         "코스 요리처럼 격식 있는 건 싫고 회식 특유의 어색함 좀 깨줄 수 있는 분위기면 좋겠어."
-    #     ),
-    #     category="restaurant",
-    #     tag_ids=[41, 42, 52, 44, 5],  # 친목/모임, 단체, 활기찬, 가성비, 양식
-    # )
+    _run_test(
+        keyword=(
+            "팀 회식인데 채식주의자 한 명, 해산물 알레르기 한 명, "
+            "나머지 여섯은 고기 실컷 먹고 싶어 하는 상황이야. "
+            "코스 요리처럼 격식 있는 건 싫고 회식 특유의 어색함 좀 깨줄 수 있는 분위기면 좋겠어."
+        ),
+        category="restaurant",
+        tag_ids=[41, 42, 52, 44, 5],  # 친목/모임, 단체, 활기찬, 가성비, 양식
+    )
 
     # [3] 소개팅 — 상대 모름, 가격 애매, 브런치 가능, 인스타 오버는 싫음
     # _run_test(
@@ -875,7 +871,7 @@ if __name__ == "__main__":
     #     category="restaurant",
     # )
 
-    _run_test(
-        keyword="요술밥상과 비슷한 분위기의 식당",
-        category="restaurant",
-    )
+    # _run_test(
+    #     keyword="요술밥상과 비슷한 분위기의 식당",
+    #     category="restaurant",
+    # )
