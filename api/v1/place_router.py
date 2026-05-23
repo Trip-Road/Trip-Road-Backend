@@ -15,7 +15,7 @@ from models.user import User
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse, PlaceDetailResponse
 from services.landmarks import find_landmark
-from services.place_service import attach_place_info, get_filtered_place_ids, get_place_detail_info
+from services.place_service import attach_place_info, get_filtered_place_ids, get_name_match_ids, get_place_detail_info
 from services.rag_graph import run_rag
 from services.weather_service import get_current_weather, get_forecast_weather, get_mid_term_weather
 
@@ -123,6 +123,7 @@ def search_places(
         db.commit()
 
     # 2차: Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
+    name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
     visit_context = {
         "target_date": request.target_date,
         "target_time": request.target_time,
@@ -133,6 +134,7 @@ def search_places(
         valid_ids=valid_place_ids,
         weather_info=weather_info,
         visit_context=visit_context,
+        name_match_ids=name_match_ids,
     )
 
     places = attach_place_info(result["places"], db)
@@ -204,12 +206,14 @@ def get_recommendations(
     if not keyword and weather_info:
         keyword = _weather_to_keyword(weather_info)
 
+    name_match_ids = get_name_match_ids(db, keyword, valid_place_ids) if keyword else []
     visit_context = {"category": category}
     result = run_rag(
         keyword=keyword,
         valid_ids=valid_place_ids,
         weather_info=weather_info,
         visit_context=visit_context,
+        name_match_ids=name_match_ids,
     )
 
     places = attach_place_info(result["places"], db)

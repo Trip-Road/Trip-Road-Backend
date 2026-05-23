@@ -60,6 +60,7 @@ class PlaceRAGState(TypedDict):
     primary_keywords   : list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
     secondary_keywords : list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
     exclusion_keywords : list[str]  # 주력 메뉴·특색이면 추천 불가 (알레르기·기피 재료 등)
+    name_match_ids     : list[int]  # 가게 이름이 키워드와 일치하는 장소 ID (1순위 배치)
     embedding          : list[float] # rewrite와 병렬로 미리 계산된 임베딩
     valid_ids          : list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
     candidates         : list[dict] # ChromaDB retrieve 결과 (상위 N개)
@@ -292,6 +293,35 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             seen.add(p["place_id"])
             candidates.append(p)
 
+    # 4) 이름 직접 매칭 장소: ChromaDB에서 명시적으로 가져와 맨 앞에 배치
+    name_match_ids_raw   = state.get("name_match_ids") or []
+    valid_set            = set(valid_ids)
+    name_match_ids_valid = [pid for pid in name_match_ids_raw if pid in valid_set]
+    if name_match_ids_valid:
+        nm_where = {"place_id": {"$in": [str(pid) for pid in name_match_ids_valid]}}
+        try:
+            nm_res = collection.query(
+                query_embeddings=[embedding],
+                n_results=len(name_match_ids_valid),
+                where=nm_where,
+                include=["metadatas", "documents", "distances"],
+            )
+            nm_candidates = []
+            for m, doc, dist in zip(
+                nm_res["metadatas"][0], nm_res["documents"][0], nm_res["distances"][0]
+            ):
+                pid = int(m["place_id"])
+                c = _to_candidate(m, doc, dist,
+                                  matched_primary=len(primary_match.get(pid, set())),
+                                  total_primary=total_primary,
+                                  matched_secondary=len(secondary_match.get(pid, set())))
+                c["is_name_match"] = True
+                nm_candidates.append(c)
+            nm_pids    = {c["place_id"] for c in nm_candidates}
+            candidates = nm_candidates + [c for c in candidates if c["place_id"] not in nm_pids]
+        except Exception:
+            pass
+
     return {"candidates": candidates}
 
 
@@ -305,6 +335,8 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     n_results          = 10
 
     def _priority_level(p: dict) -> int:
+        if p.get("is_name_match"):     # 이름 직접 매칭 → 최우선
+            return -1
         mp = p.get("matched_primary", 0)
         tp = p.get("total_primary", 0)
         ms = p.get("matched_secondary", 0)
@@ -318,6 +350,8 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     def _label(p: dict) -> str:
         lvl = _priority_level(p)
+        if lvl == -1:
+            return " [NAME_MATCH: 이름 직접 일치]"
         if lvl == 0:
             return " [EXACT: 검색 아이템 실제 보유]"
         if lvl == 1:
@@ -379,6 +413,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"위 장소 중 검색어와 가장 관련성 높은 최대 {n_results}개를 골라 places에 담고, "
         f"선호 카테고리와 날씨 조건도 함께 고려하세요.\n"
         f"summary 작성 규칙:\n"
+        f"- [NAME_MATCH] 장소: 검색어와 이름이 직접 일치합니다. 절대 제외 조건과 충돌하지 않는 한 반드시 places 첫 번째에 포함하고, 장소 특징을 중심으로 서술하세요.\n"
         f"- [EXACT] 장소: primary 아이템({primary_str})이 리뷰에서 실제로 확인된 곳입니다. 보유 사실을 명확히 언급하세요.\n"
         f"- [RELEVANT] 장소: primary({primary_str}) 보유 여부는 리뷰에서 확인되지 않았습니다. "
         f"절대 보유한다고 단정하지 말고, '다양한 메뉴 구성으로 선택 가능성이 있습니다' 같은 가능성 표현을 쓰세요.\n"
@@ -386,7 +421,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"위 구분을 지키면서 날씨·카테고리 등 반영 요소를 포함해 2-3문장으로 작성하세요.\n"
         f"- 장소 이름은 절대 언급하지 마세요. 분위기·특징·추천 이유만 설명하세요.\n"
         f"- 검색어에 식이 제한(채식, 알레르기 등)이 언급된 경우, 확인된 사실만 서술하고 불확실하면 '방문 전 확인 권장' 표현을 사용하세요.\n"
-        f"순서 규칙: [EXACT] → [RELEVANT] → [CURATED] 순으로 places 배열에 배치하세요.\n"
+        f"순서 규칙: [NAME_MATCH] → [EXACT] → [RELEVANT] → [CURATED] 순으로 places 배열에 배치하세요.\n"
         f"반드시 place_id 값을 그대로 사용하고, 아래 JSON 형식으로만 응답하세요:\n{json_format}"
     )
 
@@ -456,6 +491,7 @@ def run_rag(
     valid_ids: list[int],
     weather_info: dict | None = None,
     visit_context: dict | None = None,
+    name_match_ids: list[int] | None = None,
 ) -> dict:
     """
     MySQL 1차 필터 결과(valid_ids)를 받아 RAG 파이프라인 실행.
@@ -472,6 +508,7 @@ def run_rag(
         "primary_keywords"  : [],
         "secondary_keywords": [],
         "exclusion_keywords": [],
+        "name_match_ids"    : name_match_ids or [],
         "embedding"         : [],
         "valid_ids"         : valid_ids,
         "candidates"        : [],
@@ -481,7 +518,7 @@ def run_rag(
         "visit_context"     : visit_context or {},
     }
 
-    _INTERNAL_KEYS = {"matched_primary", "total_primary", "matched_secondary", "summary"}
+    _INTERNAL_KEYS = {"matched_primary", "total_primary", "matched_secondary", "summary", "is_name_match"}
 
     final  = _graph.invoke(initial)
     places = []
@@ -490,7 +527,9 @@ def run_rag(
         mp = p.get("matched_primary", 0)
         tp = p.get("total_primary", 0)
         ms = p.get("matched_secondary", 0)
-        if tp > 0 and mp == tp:
+        if p.get("is_name_match"):
+            place["match_type"] = "name_match"
+        elif tp > 0 and mp == tp:
             place["match_type"] = "exact"
         elif mp > 0 or ms > 0:
             place["match_type"] = "relevant"
@@ -513,7 +552,7 @@ if __name__ == "__main__":
     import models.place              # noqa: F401
 
     from db.mysql import SessionLocal
-    from services.place_service import get_filtered_place_ids
+    from services.place_service import get_filtered_place_ids, get_name_match_ids
     from services.landmarks import find_landmark
     from schemas.request import PlaceSearchRequest
 
@@ -580,7 +619,8 @@ if __name__ == "__main__":
                 ref_lng=final_lng,
                 radius_km=radius_km,
             )
-            valid_ids = get_filtered_place_ids(db, req)
+            valid_ids      = get_filtered_place_ids(db, req)
+            name_match_ids = get_name_match_ids(db, keyword, valid_ids)
         finally:
             db.close()
 
@@ -590,6 +630,8 @@ if __name__ == "__main__":
         else:
             print("  → 조건에 맞는 장소 없음. 종료.")
             return
+        if name_match_ids:
+            print(f"  이름 매칭: place_ids={name_match_ids}")
 
         # ── RAG 파이프라인 ───────────────────────────────────────────────
         print(f"\n[2~4단계] RAG 파이프라인 실행 중 ...")
@@ -601,6 +643,7 @@ if __name__ == "__main__":
             "primary_keywords"  : [],
             "secondary_keywords": [],
             "exclusion_keywords": [],
+            "name_match_ids"    : name_match_ids,
             "embedding"         : [],
             "valid_ids"         : valid_ids,
             "candidates"        : [],
@@ -631,7 +674,9 @@ if __name__ == "__main__":
                     mp = c.get("matched_primary", 0)
                     tp = c.get("total_primary", 0)
                     ms = c.get("matched_secondary", 0)
-                    if tp > 0 and mp == tp:
+                    if c.get("is_name_match"):
+                        mark = " ★NAME_MATCH"
+                    elif tp > 0 and mp == tp:
                         mark = f" ★EXACT(primary {mp}/{tp})"
                     elif mp > 0:
                         mark = f" ★RELEVANT(primary {mp}/{tp})"
@@ -659,7 +704,9 @@ if __name__ == "__main__":
             mp = place.get("matched_primary", 0)
             tp = place.get("total_primary", 0)
             ms = place.get("matched_secondary", 0)
-            if tp > 0 and mp == tp:
+            if place.get("is_name_match"):
+                match_type = "name_match"
+            elif tp > 0 and mp == tp:
                 match_type = "exact"
             elif mp > 0 or ms > 0:
                 match_type = "relevant"

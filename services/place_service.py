@@ -11,6 +11,18 @@ from models.tag import Tag
 from schemas.request import PlaceSearchRequest
 
 
+def get_name_match_ids(db: Session, keyword: str, valid_ids: list[int]) -> list[int]:
+    """keyword가 name에 포함되는 장소 ID를 valid_ids 내에서 반환 (이름 직접 매칭용)"""
+    if not keyword or not valid_ids:
+        return []
+    rows = (
+        db.query(Place.place_id)
+        .filter(Place.place_id.in_(valid_ids), Place.name.ilike(f"%{keyword}%"))
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
 def attach_place_info(rag_places: list[dict], db: Session) -> list[dict]:
     """RAG 결과에 MySQL에서 조회한 name, image를 붙이고 summary를 제거한다."""
     if not rag_places:
