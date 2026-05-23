@@ -122,8 +122,27 @@ def search_places(
             db.delete(old_history)
         db.commit()
 
-    # 2차: Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
+    # 2차: 이름 직접 매칭 확인 → 있으면 RAG 없이 즉시 반환
     name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
+    if name_match_ids:
+        places_raw = db.query(Place).options(joinedload(Place.tags)).filter(
+            Place.place_id.in_(name_match_ids)
+        ).all()
+        places = [
+            {
+                "place_id"  : p.place_id,
+                "name"      : p.name,
+                "category"  : p.category,
+                "tags"      : [t.tag_name for t in p.tags],
+                "similarity": 1.0,
+                "image"     : p.image_url,
+                "match_type": "name_match",
+            }
+            for p in places_raw
+        ]
+        return {"message": "검색 완료", "places": places, "ai_summary": ""}
+
+    # 이름 매칭 없음 → Query Rewrite → ChromaDB 시맨틱 검색 → LLM 선별 (LangGraph RAG)
     visit_context = {
         "target_date": request.target_date,
         "target_time": request.target_time,
@@ -134,7 +153,6 @@ def search_places(
         valid_ids=valid_place_ids,
         weather_info=weather_info,
         visit_context=visit_context,
-        name_match_ids=name_match_ids,
     )
 
     places = attach_place_info(result["places"], db)
