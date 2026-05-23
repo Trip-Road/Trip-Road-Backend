@@ -59,6 +59,7 @@ class PlaceRAGState(TypedDict):
     question           : str        # rewrite 이후 최적화된 검색 쿼리
     primary_keywords   : list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
     secondary_keywords : list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
+    exclusion_keywords : list[str]  # 주력 메뉴·특색이면 추천 불가 (알레르기·기피 재료 등)
     embedding          : list[float] # rewrite와 병렬로 미리 계산된 임베딩
     valid_ids          : list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
     candidates         : list[dict] # ChromaDB retrieve 결과 (상위 N개)
@@ -89,7 +90,8 @@ _REWRITE_SYSTEM = f"""당신은 장소 추천 검색 전문가입니다.
 {{
   "question": "벡터 검색에 최적화된 한 문장",
   "primary_keywords": ["사용자가 가장 원하는 핵심 아이템 — 반드시 있어야 하는 것"],
-  "secondary_keywords": ["부가 메뉴·음식·음료 또는 문맥에 맞는 태그명"]
+  "secondary_keywords": ["부가 메뉴·음식·음료 또는 문맥에 맞는 태그명"],
+  "exclusion_keywords": ["절대 포함하면 안 되는 음식·재료·특성 — 없으면 빈 배열"]
 }}
 
 question 작성 규칙:
@@ -120,6 +122,15 @@ secondary_keywords 작성 규칙:
 - 예: "카공하기 좋은 조용한 카페" → ["혼카", "조용한"]
 - 예: "채식주의자 + 고기 원하는 사람 혼재 회식" → ["뷔페", "친목/모임", "단체"]
 - 태그는 반드시 아래 available_tags 목록에서만 선택 (목록에 없는 단어 생성 금지)
+- 없으면 빈 배열 []
+
+exclusion_keywords 작성 규칙:
+- 사용자가 명시한 알레르기 유발 식품·재료 (해산물, 견과류, 유제품, 글루텐 등) 추출
+- 명시적 기피 음식·재료 (고수, 내장, 특정 재료 등) 추출
+- 추출 기준: 이 항목이 장소의 주력 메뉴이거나 주된 특색이라면 추천하면 안 되는 것
+- 단순 취향·분위기(조용한, 격식 등)는 포함하지 말 것
+- 예: "해산물 알레르기 있는 팀원이 있어" → ["해산물"]
+- 예: "견과류 알레르기 있고 유제품 못 먹어" → ["견과류", "유제품"]
 - 없으면 빈 배열 []
 
 available_tags:
@@ -167,11 +178,13 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     question           = raw.get("question", keyword).strip()
     primary_keywords   = raw.get("primary_keywords", [])
     secondary_keywords = raw.get("secondary_keywords", [])
+    exclusion_keywords = raw.get("exclusion_keywords", [])
 
     result = {
         "question"          : question,
         "primary_keywords"  : primary_keywords,
         "secondary_keywords": secondary_keywords,
+        "exclusion_keywords": exclusion_keywords,
         "embedding"         : embedding,
     }
     _rewrite_cache[keyword] = result
@@ -288,6 +301,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     candidates         = state["candidates"]
     primary_kws        = state.get("primary_keywords") or []
     secondary_kws      = state.get("secondary_keywords") or []
+    exclusion_kws      = state.get("exclusion_keywords") or []
     n_results          = 10
 
     def _priority_level(p: dict) -> int:
@@ -343,12 +357,14 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     visit_line = f"\n방문 조건: {', '.join(visit_parts)}{weather_context}\n" if visit_parts else ""
 
-    # primary/secondary 키워드를 프롬프트에 명시
+    # primary/secondary/exclusion 키워드를 프롬프트에 명시
     primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
     secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
+    exclusion_str = ", ".join(exclusion_kws) if exclusion_kws else "없음"
     kw_line = (
         f"핵심 아이템(primary, 반드시 보유): {primary_str}\n"
         f"부가 아이템(secondary, 있으면 좋음): {secondary_str}\n"
+        f"절대 제외(주력 메뉴·특색인 장소 선택 불가): {exclusion_str}\n"
     )
 
     json_format = (
@@ -455,6 +471,7 @@ def run_rag(
         "question"          : keyword,
         "primary_keywords"  : [],
         "secondary_keywords": [],
+        "exclusion_keywords": [],
         "embedding"         : [],
         "valid_ids"         : valid_ids,
         "candidates"        : [],
@@ -583,6 +600,7 @@ if __name__ == "__main__":
             "question"          : keyword,
             "primary_keywords"  : [],
             "secondary_keywords": [],
+            "exclusion_keywords": [],
             "embedding"         : [],
             "valid_ids"         : valid_ids,
             "candidates"        : [],
@@ -603,6 +621,7 @@ if __name__ == "__main__":
                 print(f"    재작성      : {node_out.get('question', '')}")
                 print(f"    primary     : {node_out.get('primary_keywords', [])}")
                 print(f"    secondary   : {node_out.get('secondary_keywords', [])}")
+                print(f"    exclusion   : {node_out.get('exclusion_keywords', [])}")
                 state.update(node_out)
 
             elif node_name == "retrieve":
@@ -683,25 +702,15 @@ if __name__ == "__main__":
     from datetime import date, time
 
     # ── 기존 테스트 ───────────────────────────────────────────────────────────
-    _run_test(
-        keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
-        category="cafe",
-        tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
-        weather_info={"condition": "맑음", "temperature": 22},
-        visit_context={"category": "카페", "target_date": date(2026, 5, 27)},
-        regions=["중구"]
-    )
-
-    # [5] 
     # _run_test(
-    #     keyword="반월당에 오늘 저녁 늦게 회사 사람들이랑 갈 치킨 전문점을 찾아줘, 맥주도 한잔 걸칠라고",
-    #     category="restaurant",
-    #     visit_context={
-    #         "category": "식당",
-    #         "target_date": date(2026, 5, 23),
-    #         "target_time": time(21, 30),
-    #     },
+    #     keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
+    #     category="cafe",
+    #     tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
+    #     weather_info={"condition": "맑음", "temperature": 22},
+    #     visit_context={"category": "카페", "target_date": date(2026, 5, 27)},
+    #     regions=["중구"]
     # )
+
 
     # [6] 좌표 직접 지정 — DB 장소 좌표 또는 임의 좌표로 주변 검색
     # 예: 수성못 좌표(35.8523, 128.6318) 반경 1km 내 카페
@@ -773,7 +782,21 @@ if __name__ == "__main__":
     #     weather_info={"condition": "맑음", "temperature": 16},
     #     visit_context={
     #         "category": "카페",
-    #         "target_date": date(2026, 5, 20),
+    #         "target_date": date(2026, 5, 25),
     #         "target_time": time(22, 0),
     #     },
     # )
+
+   
+    _run_test(
+        keyword=(
+            "동대구역 근처 밤 9시 넘어서 운영하는 맛집"
+        ),
+        category="restaurant",
+        tag_ids=[44],          
+        weather_info={"condition": "맑음", "temperature": 16},
+        visit_context={
+            "target_date": date(2026, 5, 25),
+            "target_time": time(21, 0),
+        },
+    )
