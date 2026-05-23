@@ -37,9 +37,6 @@ EMBED_MODEL          = "text-embedding-3-small"
 CHAT_MODEL           = "gpt-4o-mini"
 N_CANDIDATES    = 20
 
-# ── rewrite 결과 캐시 (keyword → {question, primary, secondary, embedding}) ──
-_rewrite_cache: dict[str, dict] = {}
-
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
 _openai: OpenAI | None = None
@@ -147,10 +144,6 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     from concurrent.futures import ThreadPoolExecutor as _TPE
     keyword = state["keyword"]
 
-    cached = _rewrite_cache.get(keyword)
-    if cached:
-        return cached
-
     def _do_rewrite():
         return _client().chat.completions.create(
             model=CHAT_MODEL,
@@ -181,15 +174,13 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     secondary_keywords = raw.get("secondary_keywords", [])
     exclusion_keywords = raw.get("exclusion_keywords", [])
 
-    result = {
+    return {
         "question"          : question,
         "primary_keywords"  : primary_keywords,
         "secondary_keywords": secondary_keywords,
         "exclusion_keywords": exclusion_keywords,
         "embedding"         : embedding,
     }
-    _rewrite_cache[keyword] = result
-    return result
 
 
 def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
@@ -321,6 +312,14 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             candidates = nm_candidates + [c for c in candidates if c["place_id"] not in nm_pids]
         except Exception:
             pass
+
+    # 5) exclusion_keywords: summary에 기피 키워드가 포함된 후보 제거
+    exclusion_kws = state.get("exclusion_keywords") or []
+    if exclusion_kws:
+        candidates = [
+            c for c in candidates
+            if not any(kw in c["summary"] for kw in exclusion_kws)
+        ]
 
     return {"candidates": candidates}
 

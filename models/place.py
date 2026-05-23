@@ -47,7 +47,7 @@ class OperatingHour(Base):
     place_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("Places.place_id", ondelete="CASCADE"), nullable=False
     )
-    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False, comment="1:월~7:일")
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False, comment="0:월~6:일")
     is_closed: Mapped[bool] = mapped_column(Boolean, default=False, comment="정기휴무")
     open_time: Mapped[Optional[time]] = mapped_column(Time)
     close_time: Mapped[Optional[time]] = mapped_column(Time)

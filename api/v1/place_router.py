@@ -225,6 +225,24 @@ def get_recommendations(
         keyword = _weather_to_keyword(weather_info)
 
     name_match_ids = get_name_match_ids(db, keyword, valid_place_ids) if keyword else []
+
+    # 이름 직접 매칭 시: 해당 가게와 비슷한 장소 추천으로 전환
+    if name_match_ids and keyword:
+        matched_place = (
+            db.query(Place)
+            .options(joinedload(Place.tags))
+            .filter(Place.place_id == name_match_ids[0])
+            .first()
+        )
+        if matched_place:
+            tags_str = ", ".join([t.tag_name for t in matched_place.tags])
+            keyword = (
+                f"{keyword}과 비슷한 분위기의 {matched_place.category or ''}"
+                + (f" (태그: {tags_str})" if tags_str else "")
+            )
+            valid_place_ids = [pid for pid in valid_place_ids if pid not in set(name_match_ids)]
+        name_match_ids = []
+
     visit_context = {"category": category}
     result = run_rag(
         keyword=keyword,
