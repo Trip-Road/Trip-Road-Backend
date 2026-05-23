@@ -19,6 +19,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
 # 직접 실행 시 프로젝트 루트를 경로에 추가
@@ -35,7 +36,7 @@ from db.chroma import get_chroma_client
 COLLECTION_NAME      = "place_reviews"
 EMBED_MODEL          = "text-embedding-3-small"
 CHAT_MODEL           = "gpt-4o-mini"
-N_CANDIDATES    = 20
+N_CANDIDATES         = 20
 
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
@@ -47,6 +48,24 @@ def _client() -> OpenAI:
     if _openai is None:
         _openai = OpenAI(api_key=settings.OPENAI_API_KEY)
     return _openai
+
+
+# ── 내부 헬퍼 ─────────────────────────────────────────────────────────────────
+
+_INTERNAL_KEYS = frozenset({"matched_primary", "total_primary", "matched_secondary", "summary", "is_name_match"})
+
+
+def _match_type(p: dict) -> str:
+    """후보 dict로부터 match_type 문자열 결정 (name_match > exact > relevant > curated)"""
+    if p.get("is_name_match"):
+        return "name_match"
+    mp = p.get("matched_primary", 0)
+    tp = p.get("total_primary", 0)
+    if tp > 0 and mp == tp:
+        return "exact"
+    if mp > 0 or p.get("matched_secondary", 0) > 0:
+        return "relevant"
+    return "curated"
 
 
 # ── GraphState ────────────────────────────────────────────────────────────────
@@ -139,9 +158,7 @@ available_tags:
 
 def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     """구어체 키워드 → 벡터 검색 최적화 문장 + 핵심 아이템 키워드 추출
-    - 캐시: 동일 키워드 재검색 시 LLM 호출 스킵
     - embedding은 rewrite LLM 호출과 병렬로 원본 키워드로 미리 계산"""
-    from concurrent.futures import ThreadPoolExecutor as _TPE
     keyword = state["keyword"]
 
     def _do_rewrite():
@@ -162,14 +179,18 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
             .data[0].embedding
         )
 
-    with _TPE(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         rewrite_future = executor.submit(_do_rewrite)
         embed_future   = executor.submit(_do_embed)
         resp      = rewrite_future.result()
         embedding = embed_future.result()
 
-    raw                = json.loads(resp.choices[0].message.content)
-    question           = raw.get("question", keyword).strip()
+    try:
+        raw = json.loads(resp.choices[0].message.content)
+    except Exception:
+        raw = {}
+
+    question           = raw.get("question", keyword).strip() or keyword
     primary_keywords   = raw.get("primary_keywords", [])
     secondary_keywords = raw.get("secondary_keywords", [])
     exclusion_keywords = raw.get("exclusion_keywords", [])
@@ -199,7 +220,11 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             .data[0].embedding
         )
 
-    collection = get_chroma_client().get_collection(name=COLLECTION_NAME)
+    try:
+        collection = get_chroma_client().get_collection(name=COLLECTION_NAME)
+    except Exception:
+        return {"candidates": []}
+
     where_ids  = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
 
     def _to_candidate(m: dict, doc: str, dist: float,
@@ -250,24 +275,28 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     _search_keywords(secondary_kws, secondary_match)
 
     # 2) 시맨틱 검색
-    n_query = min(N_CANDIDATES, len(valid_ids))
-    results  = collection.query(
-        query_embeddings=[embedding],
-        n_results=n_query,
-        where=where_ids,
-        include=["metadatas", "documents", "distances"],
-    )
-    semantic_list = [
-        _to_candidate(m, doc, dist,
-                      matched_primary=len(primary_match.get(int(m["place_id"]), set())),
-                      total_primary=total_primary,
-                      matched_secondary=len(secondary_match.get(int(m["place_id"]), set())))
-        for m, doc, dist in zip(
-            results["metadatas"][0],
-            results["documents"][0],
-            results["distances"][0],
+    try:
+        n_query = min(N_CANDIDATES, len(valid_ids))
+        results  = collection.query(
+            query_embeddings=[embedding],
+            n_results=n_query,
+            where=where_ids,
+            include=["metadatas", "documents", "distances"],
         )
-    ]
+        semantic_list = [
+            _to_candidate(m, doc, dist,
+                          matched_primary=len(primary_match.get(int(m["place_id"]), set())),
+                          total_primary=total_primary,
+                          matched_secondary=len(secondary_match.get(int(m["place_id"]), set())))
+            for m, doc, dist in zip(
+                results["metadatas"][0],
+                results["documents"][0],
+                results["distances"][0],
+            )
+        ]
+    except Exception:
+        semantic_list = []
+
     # 3) 병합: 텍스트 매칭 장소 먼저, 이후 시맨틱 전용 (중복 제거)
     all_matched_pids = set(primary_match.keys()) | set(secondary_match.keys())
     token_candidates = [
@@ -332,34 +361,19 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     secondary_kws      = state.get("secondary_keywords") or []
     n_results          = 10
 
-    def _priority_level(p: dict) -> int:
-        if p.get("is_name_match"):     # 이름 직접 매칭 → 최우선
-            return -1
-        mp = p.get("matched_primary", 0)
-        tp = p.get("total_primary", 0)
-        ms = p.get("matched_secondary", 0)
-        if tp > 0 and mp == tp:        # primary 전부 매칭 → exact
-            return 0
-        if mp > 0 or ms > 0:           # 일부 매칭 → relevant
-            return 1
-        return 2                       # 아무것도 없음 → curated
-
-    sorted_candidates = sorted(candidates, key=_priority_level)
-
-    def _label(p: dict) -> str:
-        lvl = _priority_level(p)
-        if lvl == -1:
-            return " [NAME_MATCH: 이름 직접 일치]"
-        if lvl == 0:
-            return " [EXACT: 검색 아이템 실제 보유]"
-        if lvl == 1:
-            return " [RELEVANT: 키워드 언급됨]"
-        return " [CURATED: 취향 기반 선별]"
+    _PRIORITY = {"name_match": -1, "exact": 0, "relevant": 1, "curated": 2}
+    _LABELS   = {
+        "name_match": " [NAME_MATCH: 이름 직접 일치]",
+        "exact":      " [EXACT: 검색 아이템 실제 보유]",
+        "relevant":   " [RELEVANT: 키워드 언급됨]",
+        "curated":    " [CURATED: 취향 기반 선별]",
+    }
+    sorted_candidates = sorted(candidates, key=lambda p: _PRIORITY[_match_type(p)])
 
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
         f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}"
-        + _label(p)
+        + _LABELS[_match_type(p)]
         for p in sorted_candidates
     )
 
@@ -427,7 +441,11 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         response_format={"type": "json_object"},
     )
 
-    raw = json.loads(resp.choices[0].message.content)
+    try:
+        raw = json.loads(resp.choices[0].message.content)
+    except Exception:
+        raw = {}
+
     ranked     = raw.get("places", [])
     ai_summary = raw.get("summary", "")
 
@@ -435,9 +453,16 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     results = []
     for item in ranked[:n_results]:
-        pid = int(item["place_id"])
+        try:
+            pid = int(item["place_id"])
+        except (KeyError, ValueError, TypeError):
+            continue
         if pid in candidate_map:
             results.append(candidate_map[pid])
+
+    # LLM이 아무것도 선택하지 않았으면 유사도 상위 후보를 그대로 반환
+    if not results:
+        results = sorted_candidates[:n_results]
 
     return {"results": results, "ai_summary": ai_summary}
 
@@ -513,23 +538,15 @@ def run_rag(
         "visit_context"     : visit_context or {},
     }
 
-    _INTERNAL_KEYS = {"matched_primary", "total_primary", "matched_secondary", "summary", "is_name_match"}
+    try:
+        final = _graph.invoke(initial)
+    except Exception:
+        return {"places": [], "ai_summary": ""}
 
-    final  = _graph.invoke(initial)
     places = []
     for p in final["results"]:
         place = {k: v for k, v in p.items() if k not in _INTERNAL_KEYS}
-        mp = p.get("matched_primary", 0)
-        tp = p.get("total_primary", 0)
-        ms = p.get("matched_secondary", 0)
-        if p.get("is_name_match"):
-            place["match_type"] = "name_match"
-        elif tp > 0 and mp == tp:
-            place["match_type"] = "exact"
-        elif mp > 0 or ms > 0:
-            place["match_type"] = "relevant"
-        else:
-            place["match_type"] = "curated"
+        place["match_type"] = _match_type(p)
         places.append(place)
     return {"places": places, "ai_summary": final["ai_summary"]}
 
@@ -718,18 +735,7 @@ if __name__ == "__main__":
         print(f"\n{'─'*65}")
         print(f"최종 추천 {len(results)}개\n")
         for i, place in enumerate(results, 1):
-            mp = place.get("matched_primary", 0)
-            tp = place.get("total_primary", 0)
-            ms = place.get("matched_secondary", 0)
-            if place.get("is_name_match"):
-                match_type = "name_match"
-            elif tp > 0 and mp == tp:
-                match_type = "exact"
-            elif mp > 0 or ms > 0:
-                match_type = "relevant"
-            else:
-                match_type = "curated"
-            print(f"  [{i}] place_id  : {place['place_id']}  [{match_type}]")
+            print(f"  [{i}] place_id  : {place['place_id']}  [{_match_type(place)}]")
             print(f"      카테고리  : {place['category']}")
             print(f"      태그      : {place['tags']}")
             print(f"      유사도    : {place['similarity']}")
