@@ -71,8 +71,8 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
     if request.tag_ids:
         query = query.filter(Place.tags.any(Tag.tag_id.in_(request.tag_ids)))
 
-    # 방문 예정일 및 방문 시간 필터
-    if request.target_date or request.target_time:
+    # 방문 예정일 및 방문 시간 필터 (TOURIST_SPOT은 운영시간 데이터 없는 곳이 많아 스킵)
+    if (request.target_date or request.target_time) and request.category != "TOURIST_SPOT":
         query = query.join(Place.operating_hours)
 
         # 방문 날짜 필터

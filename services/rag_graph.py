@@ -645,6 +645,30 @@ if __name__ == "__main__":
         if name_match_ids:
             print(f"  이름 매칭: place_ids={name_match_ids}")
 
+        # ── TOURIST_SPOT: RAG 없이 MySQL 결과 바로 반환 ──────────────────
+        if category == "TOURIST_SPOT":
+            print(f"\n[TOURIST_SPOT] RAG 스킵 → MySQL 위치 기반 결과 직접 반환")
+            db2 = SessionLocal()
+            try:
+                from models.place import Place as _Place
+                from sqlalchemy.orm import joinedload as _jl
+                import random
+                sample_ids = random.sample(valid_ids, min(10, len(valid_ids)))
+                places_raw = db2.query(_Place).options(_jl(_Place.tags)).filter(
+                    _Place.place_id.in_(sample_ids)
+                ).all()
+            finally:
+                db2.close()
+            print(f"\n{'─'*65}")
+            print(f"최종 추천 {len(places_raw)}개  [location]\n")
+            for i, p in enumerate(places_raw, 1):
+                print(f"  [{i}] place_id  : {p.place_id}  [location]")
+                print(f"      이름      : {p.name}")
+                print(f"      카테고리  : {p.category}")
+                print(f"      태그      : {[t.tag_name for t in p.tags]}")
+                print()
+            return
+
         # ── 이름 매칭 시 RAG 건너뜀 (place_router.py search_places 동일 로직) ──
         if name_match_ids:
             print(f"\n[NAME_MATCH] 이름 직접 매칭 → RAG 없이 DB에서 즉시 반환")
@@ -816,15 +840,15 @@ if __name__ == "__main__":
     # )
 
     # [2] 팀 회식 — 채식주의자 + 해산물 알레르기 + 고기파 혼재
-    _run_test(
-        keyword=(
-            "팀 회식인데 채식주의자 한 명, 해산물 알레르기 한 명, "
-            "나머지 여섯은 고기 실컷 먹고 싶어 하는 상황이야. "
-            "코스 요리처럼 격식 있는 건 싫고 회식 특유의 어색함 좀 깨줄 수 있는 분위기면 좋겠어."
-        ),
-        category="restaurant",
-        tag_ids=[41, 42, 52, 44, 5],  # 친목/모임, 단체, 활기찬, 가성비, 양식
-    )
+    # _run_test(
+    #     keyword=(
+    #         "팀 회식인데 채식주의자 한 명, 해산물 알레르기 한 명, "
+    #         "나머지 여섯은 고기 실컷 먹고 싶어 하는 상황이야. "
+    #         "코스 요리처럼 격식 있는 건 싫고 회식 특유의 어색함 좀 깨줄 수 있는 분위기면 좋겠어."
+    #     ),
+    #     category="restaurant",
+    #     tag_ids=[41, 42, 52, 44, 5],  # 친목/모임, 단체, 활기찬, 가성비, 양식
+    # )
 
     # [3] 소개팅 — 상대 모름, 가격 애매, 브런치 가능, 인스타 오버는 싫음
     # _run_test(
@@ -881,3 +905,11 @@ if __name__ == "__main__":
     #     keyword="요술밥상과 비슷한 분위기의 식당",
     #     category="restaurant",
     # )
+
+    # [관광명소] 가족 나들이
+    _run_test(
+        keyword="가족끼리 나들이 가기 좋은 자연 풍경 명소",
+        category="TOURIST_SPOT",
+        weather_info={"condition": "맑음", "temperature": 22},
+        regions=["중구"]
+    )

@@ -1,3 +1,4 @@
+import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date as date_class
 from datetime import datetime
@@ -122,6 +123,29 @@ def search_places(
             db.delete(old_history)
         db.commit()
 
+    # TOURIST_SPOT: RAG 없이 MySQL 필터 결과를 위치 기반으로 바로 반환
+    if request.category == "TOURIST_SPOT":
+        sample_ids = random.sample(valid_place_ids, min(10, len(valid_place_ids)))
+        places_raw = (
+            db.query(Place)
+            .options(joinedload(Place.tags))
+            .filter(Place.place_id.in_(sample_ids))
+            .all()
+        )
+        places = [
+            {
+                "place_id"  : p.place_id,
+                "name"      : p.name,
+                "category"  : p.category,
+                "tags"      : [t.tag_name for t in p.tags],
+                "similarity": None,
+                "image"     : p.image_url,
+                "match_type": "location",
+            }
+            for p in places_raw
+        ]
+        return {"message": "검색 완료", "places": places, "ai_summary": ""}
+
     # 2차: 이름 직접 매칭 확인 → 있으면 RAG 없이 즉시 반환
     name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
     if name_match_ids:
@@ -199,6 +223,28 @@ def get_recommendations(
 
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": [], "ai_summary": ""}
+
+    # TOURIST_SPOT: RAG 없이 MySQL 필터 결과를 위치 기반으로 바로 반환
+    if category == "TOURIST_SPOT":
+        sample_ids = random.sample(valid_place_ids, min(10, len(valid_place_ids)))
+        places_raw = (
+            db.query(Place)
+            .options(joinedload(Place.tags))
+            .filter(Place.place_id.in_(sample_ids))
+            .all()
+        )
+        places = [
+            {
+                "place_id"  : p.place_id,
+                "name"      : p.name,
+                "category"  : p.category,
+                "tags"      : [t.tag_name for t in p.tags],
+                "image"     : p.image_url,
+                "match_type": "location",
+            }
+            for p in places_raw
+        ]
+        return {"message": "추천 완료", "places": places, "ai_summary": ""}
 
     # keyword 없고 날씨도 없으면 → 태그 필터 결과만 반환
     if not keyword and not weather_info:
