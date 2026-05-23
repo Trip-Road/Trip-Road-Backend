@@ -51,3 +51,8 @@ class PlaceSearchRequest(BaseModel):
     tag_ids: Optional[List[int]] = Field(
         default_factory=list, description="선택된 선호 태그의 ID 목록"
     )
+
+    # 위치 기반 필터 (랜드마크 감지 시 자동 설정)
+    ref_lat: Optional[float] = Field(default=None, description="기준점 위도")
+    ref_lng: Optional[float] = Field(default=None, description="기준점 경도")
+    radius_km: float = Field(default=0.71, description="검색 반경 (km)")

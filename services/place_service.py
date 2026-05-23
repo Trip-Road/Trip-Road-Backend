@@ -1,3 +1,5 @@
+import math
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from sqlalchemy import and_, or_
@@ -68,12 +70,24 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
                 OperatingHour.day_of_week == target_day, OperatingHour.is_closed == False
             )
 
-        # 방문 시간 필터
+        # 방문 시간 필터 (이동 시간 35분 반영 — 도착 시점에도 영업 중인 곳 필터)
         if request.target_time:
-            t = request.target_time
+            t = (datetime.combine(datetime.min, request.target_time) + timedelta(minutes=35)).time()
 
             # 조건 A: 오픈 시간 <= 방문 시간 <= 마감 시간
-            time_condition = and_(OperatingHour.open_time <= t, OperatingHour.close_time >= t)
+            # 자정 미넘김(일반): open <= t <= close
+            # 자정 넘김(야간):  t >= open  OR  t <= close  (예: 17:00~02:00)
+            time_condition = or_(
+                and_(
+                    OperatingHour.close_time >= OperatingHour.open_time,
+                    OperatingHour.open_time <= t,
+                    OperatingHour.close_time >= t,
+                ),
+                and_(
+                    OperatingHour.close_time < OperatingHour.open_time,
+                    or_(OperatingHour.open_time <= t, OperatingHour.close_time >= t),
+                ),
+            )
 
             # 조건 B: 브레이크 타임이 설정되어 있지 않거나, 방문 시간이 브레이크 타임을 벗어날 것
             break_condition = or_(
@@ -91,6 +105,17 @@ def get_filtered_place_ids(db: Session, request: PlaceSearchRequest) -> List[int
             # 세 가지 조건이 모두 만족해야 함
             query = query.filter(time_condition, break_condition, last_order_condition)
 
+    # 위치 기반 필터 (랜드마크 기준점이 있을 때)
+    if request.ref_lat is not None and request.ref_lng is not None:
+        r = request.radius_km
+        delta_lat = r / 111.0
+        delta_lng = r / (111.0 * math.cos(math.radians(request.ref_lat)))
+        query = query.filter(
+            Place.latitude.isnot(None),
+            Place.longitude.isnot(None),
+            Place.latitude.between(request.ref_lat - delta_lat, request.ref_lat + delta_lat),
+            Place.longitude.between(request.ref_lng - delta_lng, request.ref_lng + delta_lng),
+        )
     # 조인으로 인해 발생할 수 있는 중복 레코드를 제거하고 결과 추출
     result = query.distinct().all()
 

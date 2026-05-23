@@ -460,6 +460,7 @@ if __name__ == "__main__":
 
     from db.mysql import SessionLocal
     from services.place_service import get_filtered_place_ids
+    from services.landmarks import find_landmark
     from schemas.request import PlaceSearchRequest
 
     def _run_test(
@@ -469,6 +470,9 @@ if __name__ == "__main__":
         tag_ids: list[int] | None = None,
         weather_info: dict | None = None,
         visit_context: dict | None = None,
+        ref_lat: float | None = None,   # 직접 좌표 지정 (랜드마크 자동 감지보다 우선)
+        ref_lng: float | None = None,
+        radius_km: float = 0.71,
     ):
         print(f"\n{'='*65}")
         print(f"  키워드  : {keyword}")
@@ -494,6 +498,23 @@ if __name__ == "__main__":
         try:
             # ── MySQL 1차 필터 ──────────────────────────────────────────
             vc = visit_context or {}
+
+            # 좌표 결정: 직접 지정 > 랜드마크 자동 감지
+            if ref_lat is not None and ref_lng is not None:
+                final_lat, final_lng = ref_lat, ref_lng
+                print(f"  위치 직접 지정: 반경 {radius_km}km 필터 적용 ({final_lat}, {final_lng})")
+            else:
+                coords = find_landmark(keyword)
+                if coords:
+                    final_lat, final_lng = coords
+                    print(f"  위치 감지: 반경 {radius_km}km 필터 적용 ({final_lat}, {final_lng})")
+                else:
+                    final_lat, final_lng = None, None
+
+            # 지역 필터와 위치 필터 충돌 경고
+            if regions and final_lat is not None:
+                print(f"  [경고] regions={regions} 와 위치 필터가 AND 조건으로 적용됩니다. 교집합이 없으면 결과 0건.")
+
             req = PlaceSearchRequest(
                 keyword=keyword,
                 category=category,
@@ -501,6 +522,9 @@ if __name__ == "__main__":
                 tag_ids=tag_ids or [],
                 target_date=vc.get("target_date"),
                 target_time=vc.get("target_time"),
+                ref_lat=final_lat,
+                ref_lng=final_lng,
+                radius_km=radius_km,
             )
             valid_ids = get_filtered_place_ids(db, req)
         finally:
@@ -621,12 +645,41 @@ if __name__ == "__main__":
     from datetime import date, time
 
     # ── 기존 테스트 ───────────────────────────────────────────────────────────
+    _run_test(
+        keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
+        category="cafe",
+        tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
+        weather_info={"condition": "맑음", "temperature": 22},
+        visit_context={"category": "카페", "target_date": date(2026, 5, 21)},
+    )
+
+    # [5] 
     # _run_test(
-    #     keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
+    #     keyword="반월당 근처에 오늘 저녁 9시반에 회사 사람들이랑 갈 치킨집을 찾아줘",
+    #     category="restaurant",
+    #     radius_km=0.71,  # 대구역 반경 0.71km 내
+    #     visit_context={
+    #         "category": "식당",
+    #         "target_date": date(2026, 5, 23),
+    #         "target_time": time(21, 30),
+    #     },
+    # )
+
+    # [6] 좌표 직접 지정 — DB 장소 좌표 또는 임의 좌표로 주변 검색
+    # 예: 수성못 좌표(35.8523, 128.6318) 반경 1km 내 카페
+    # _run_test(
+    #     keyword="분위기 좋은 카페",
     #     category="cafe",
-    #     tag_ids=[39, 53, 47, 54],   # 데이트, 아늑한, 인스타감성, 로맨틱한
-    #     weather_info={"condition": "맑음", "temperature": 22},
-    #     visit_context={"category": "카페", "target_date": date(2026, 5, 21)},
+    #     ref_lat=35.8285,   # 수성못 위도
+    #     ref_lng=128.6172,  # 수성못 경도
+    #     radius_km=1.0,
+    # )
+
+    # [7] 충돌 확인 — regions=수성구 + 동대구역 좌표 → 교집합 ≈ 0
+    # _run_test(
+    #     keyword="동대구역 근처 식당",
+    #     category="restaurant",
+    #     regions=["수성구"],   # 동대구역(동구)과 수성구는 겹치지 않음 → 결과 0건 예상
     # )
 
     # ── 꼬인 테스트 케이스 ────────────────────────────────────────────────────
@@ -671,18 +724,18 @@ if __name__ == "__main__":
     # )
 
     # [4] 야간 혼카 — 밤 10시, 혼자인데 외롭지 않은 애매한 분위기
-    _run_test(
-        keyword=(
-            "밤 10시 넘어서 혼자 가도 자연스러운 카페인데, "
-            "너무 조용해서 내 숨소리 들리는 분위기는 싫어. "
-            "디저트 하나 시켜놓고 멍 때릴 수 있는데, 혼자인 게 눈에 띄지 않는 곳."
-        ),
-        category="cafe",
-        tag_ids=[1, 55, 52],          # 혼카, 힙한/트렌디, 활기찬
-        weather_info={"condition": "맑음", "temperature": 16},
-        visit_context={
-            "category": "카페",
-            "target_date": date(2026, 5, 20),
-            "target_time": time(22, 0),
-        },
-    )
+    # _run_test(
+    #     keyword=(
+    #         "밤 10시 넘어서 혼자 가도 자연스러운 카페인데, "
+    #         "너무 조용해서 내 숨소리 들리는 분위기는 싫어. "
+    #         "디저트 하나 시켜놓고 멍 때릴 수 있는데, 혼자인 게 눈에 띄지 않는 곳."
+    #     ),
+    #     category="cafe",
+    #     tag_ids=[1, 55, 52],          # 혼카, 힙한/트렌디, 활기찬
+    #     weather_info={"condition": "맑음", "temperature": 16},
+    #     visit_context={
+    #         "category": "카페",
+    #         "target_date": date(2026, 5, 20),
+    #         "target_time": time(22, 0),
+    #     },
+    # )

@@ -13,6 +13,7 @@ from models.place import Place
 from models.user import User
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse, PlaceDetailResponse
+from services.landmarks import find_landmark
 from services.place_service import attach_place_info, get_filtered_place_ids, get_place_detail_info
 from services.rag_graph import run_rag
 from services.weather_service import get_current_weather, get_forecast_weather, get_mid_term_weather
@@ -56,6 +57,12 @@ def search_places(
     1차: RDBMS에서 카테고리/지역/시간/태그 조건으로 필터링
     2차: ChromaDB 시맨틱 검색으로 랭킹
     """
+    # keyword에서 랜드마크 감지 → 좌표 필터 자동 설정
+    if request.keyword and request.ref_lat is None:
+        coords = find_landmark(request.keyword)
+        if coords:
+            request = request.model_copy(update={"ref_lat": coords[0], "ref_lng": coords[1]})
+
     # 1차 필터링: 조건에 맞는 place_id 추출
     valid_place_ids = get_filtered_place_ids(db, request)
 
