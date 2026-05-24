@@ -12,6 +12,7 @@ from api.deps import get_current_user
 from db.mysql import get_db
 from models.history_and_event import SearchHistory
 from models.place import Place
+from models.tag import Tag
 from models.user import User
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse, PlaceDetailResponse
@@ -129,28 +130,76 @@ def search_places(
             db.delete(old_history)
         db.commit()
 
-    # TOURIST_SPOT: RAG 없이 MySQL 필터 결과를 위치 기반으로 바로 반환
+    # TOURIST_SPOT: 검색어로 RAG 실행 → 부족하면 선호태그 랜덤으로 채움
     if request.category == "TOURIST_SPOT":
-        sample_ids = random.sample(valid_place_ids, min(10, len(valid_place_ids)))
-        places_raw = (
-            db.query(Place)
-            .options(joinedload(Place.tags))
-            .filter(Place.place_id.in_(sample_ids))
-            .all()
+        tag_ids = [tag.tag_id for tag in current_user.preferred_tags]
+        name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
+        visit_context = {"category": request.category}
+
+        result = run_rag(
+            keyword=request.keyword,
+            valid_ids=valid_place_ids,
+            weather_info=weather_info,
+            visit_context=visit_context,
+            name_match_ids=name_match_ids,
         )
-        places = [
-            {
-                "place_id": p.place_id,
-                "name": p.name,
-                "category": p.category,
-                "tags": [t.tag_name for t in p.tags],
-                "similarity": None,
-                "image": p.image_url,
-                "match_type": "location",
-            }
-            for p in places_raw
-        ]
-        return {"message": "검색 완료", "places": places, "ai_summary": ""}
+        places = attach_place_info(result["places"], db)
+
+        # 10개 미만이면 선호태그 포함 장소로 채우기
+        if len(places) < 10:
+            existing_ids = {p["place_id"] for p in places}
+            remaining = 10 - len(places)
+            fallback = []
+
+            if tag_ids:
+                tagged_rows = (
+                    db.query(Place)
+                    .options(joinedload(Place.tags))
+                    .filter(
+                        Place.place_id.in_(valid_place_ids),
+                        Place.place_id.notin_(existing_ids),
+                        Place.tags.any(Tag.tag_id.in_(tag_ids)),
+                    )
+                    .all()
+                )
+                for p in random.sample(tagged_rows, min(remaining, len(tagged_rows))):
+                    fallback.append({
+                        "place_id": p.place_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "tags": [t.tag_name for t in p.tags],
+                        "similarity": None,
+                        "image": p.image_url,
+                        "match_type": "location",
+                    })
+                existing_ids.update(p["place_id"] for p in fallback)
+
+            # 선호태그로도 모자라면 valid_place_ids 내 나머지 랜덤으로
+            remaining = 10 - len(places) - len(fallback)
+            if remaining > 0:
+                any_rows = (
+                    db.query(Place)
+                    .options(joinedload(Place.tags))
+                    .filter(
+                        Place.place_id.in_(valid_place_ids),
+                        Place.place_id.notin_(existing_ids),
+                    )
+                    .all()
+                )
+                for p in random.sample(any_rows, min(remaining, len(any_rows))):
+                    fallback.append({
+                        "place_id": p.place_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "tags": [t.tag_name for t in p.tags],
+                        "similarity": None,
+                        "image": p.image_url,
+                        "match_type": "location",
+                    })
+
+            places.extend(fallback)
+
+        return {"message": "검색 완료", "places": places, "ai_summary": result.get("ai_summary", "")}
 
     # 2차: 이름 직접 매칭 확인 → 있으면 RAG 없이 즉시 반환
     name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
@@ -233,27 +282,75 @@ def get_recommendations(
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": [], "ai_summary": ""}
 
-    # TOURIST_SPOT: RAG 없이 MySQL 필터 결과를 위치 기반으로 바로 반환
+    # TOURIST_SPOT: keyword + 선호태그 활용, RAG 실행 후 부족하면 랜덤으로 채움
     if category == "TOURIST_SPOT":
-        sample_ids = random.sample(valid_place_ids, min(10, len(valid_place_ids)))
-        places_raw = (
-            db.query(Place)
-            .options(joinedload(Place.tags))
-            .filter(Place.place_id.in_(sample_ids))
-            .all()
-        )
-        places = [
-            {
-                "place_id": p.place_id,
-                "name": p.name,
-                "category": p.category,
-                "tags": [t.tag_name for t in p.tags],
-                "image": p.image_url,
-                "match_type": "location",
-            }
-            for p in places_raw
-        ]
-        return {"message": "추천 완료", "places": places, "ai_summary": ""}
+        places = []
+        ai_summary = ""
+
+        # keyword 있으면 RAG로 최적 매칭 먼저
+        if keyword:
+            result = run_rag(
+                keyword=keyword,
+                valid_ids=valid_place_ids,
+                weather_info=weather_info,
+                visit_context={"category": category},
+            )
+            places = attach_place_info(result["places"], db)
+            ai_summary = result.get("ai_summary", "")
+
+        # 10개 미만이면 선호태그 풀(valid_place_ids)에서 랜덤으로 채우기
+        if len(places) < 10:
+            existing_ids = {p["place_id"] for p in places}
+            remaining = 10 - len(places)
+            fallback = []
+
+            remaining_valid = [pid for pid in valid_place_ids if pid not in existing_ids]
+            if remaining_valid:
+                sample_ids = random.sample(remaining_valid, min(remaining, len(remaining_valid)))
+                rows = (
+                    db.query(Place)
+                    .options(joinedload(Place.tags))
+                    .filter(Place.place_id.in_(sample_ids))
+                    .all()
+                )
+                for p in rows:
+                    fallback.append({
+                        "place_id": p.place_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "tags": [t.tag_name for t in p.tags],
+                        "similarity": None,
+                        "image": p.image_url,
+                        "match_type": "location",
+                    })
+                existing_ids.update(p["place_id"] for p in fallback)
+
+            # 선호태그 풀에서도 모자라면 전체 TOURIST_SPOT에서 랜덤
+            remaining = 10 - len(places) - len(fallback)
+            if remaining > 0:
+                any_rows = (
+                    db.query(Place)
+                    .options(joinedload(Place.tags))
+                    .filter(
+                        Place.category == "TOURIST_SPOT",
+                        Place.place_id.notin_(existing_ids),
+                    )
+                    .all()
+                )
+                for p in random.sample(any_rows, min(remaining, len(any_rows))):
+                    fallback.append({
+                        "place_id": p.place_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "tags": [t.tag_name for t in p.tags],
+                        "similarity": None,
+                        "image": p.image_url,
+                        "match_type": "location",
+                    })
+
+            places.extend(fallback)
+
+        return {"message": "추천 완료", "places": places, "ai_summary": ai_summary}
 
     # keyword 없고 날씨도 없으면 → 태그 필터 결과만 반환
     if not keyword and not weather_info:

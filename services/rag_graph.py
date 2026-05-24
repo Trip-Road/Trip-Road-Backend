@@ -645,28 +645,73 @@ if __name__ == "__main__":
         if name_match_ids:
             print(f"  이름 매칭: place_ids={name_match_ids}")
 
-        # ── TOURIST_SPOT: RAG 없이 MySQL 결과 바로 반환 ──────────────────
+        # ── TOURIST_SPOT: RAG 실행 → 부족하면 선호태그 풀 랜덤 → 전체 랜덤 채움 ──
         if category == "TOURIST_SPOT":
-            print(f"\n[TOURIST_SPOT] RAG 스킵 → MySQL 위치 기반 결과 직접 반환")
-            db2 = SessionLocal()
-            try:
-                from models.place import Place as _Place
-                from sqlalchemy.orm import joinedload as _jl
-                import random
-                sample_ids = random.sample(valid_ids, min(10, len(valid_ids)))
-                places_raw = db2.query(_Place).options(_jl(_Place.tags)).filter(
-                    _Place.place_id.in_(sample_ids)
-                ).all()
-            finally:
-                db2.close()
+            print(f"\n[TOURIST_SPOT] RAG 실행 후 부족하면 랜덤으로 채움")
+
+            result = run_rag(
+                keyword=keyword,
+                valid_ids=valid_ids,
+                weather_info=weather_info,
+                visit_context={"category": category},
+                name_match_ids=name_match_ids,
+            )
+
+            import random as _random
+            from models.place import Place as _Place
+            from sqlalchemy.orm import joinedload as _jl
+
+            places = result["places"]
+            existing_ids = {p["place_id"] for p in places}
+
+            # 선호태그 풀(valid_ids)에서 랜덤으로 채우기
+            if len(places) < 10:
+                remaining_valid = [pid for pid in valid_ids if pid not in existing_ids]
+                remaining = 10 - len(places)
+                if remaining_valid:
+                    sample_ids = _random.sample(remaining_valid, min(remaining, len(remaining_valid)))
+                    db2 = SessionLocal()
+                    try:
+                        rows = db2.query(_Place).options(_jl(_Place.tags)).filter(
+                            _Place.place_id.in_(sample_ids)
+                        ).all()
+                    finally:
+                        db2.close()
+                    for p in rows:
+                        places.append({
+                            "place_id": p.place_id, "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None, "match_type": "location",
+                        })
+                    existing_ids.update(p["place_id"] for p in places)
+
+            # 전체 TOURIST_SPOT에서 남은 자리 채우기
+            remaining = 10 - len(places)
+            if remaining > 0:
+                db2 = SessionLocal()
+                try:
+                    any_rows = db2.query(_Place).options(_jl(_Place.tags)).filter(
+                        _Place.category == "TOURIST_SPOT",
+                        _Place.place_id.notin_(existing_ids),
+                    ).all()
+                finally:
+                    db2.close()
+                for p in _random.sample(any_rows, min(remaining, len(any_rows))):
+                    places.append({
+                        "place_id": p.place_id, "category": p.category,
+                        "tags": [t.tag_name for t in p.tags],
+                        "similarity": None, "match_type": "location",
+                    })
+
             print(f"\n{'─'*65}")
-            print(f"최종 추천 {len(places_raw)}개  [location]\n")
-            for i, p in enumerate(places_raw, 1):
-                print(f"  [{i}] place_id  : {p.place_id}  [location]")
-                print(f"      이름      : {p.name}")
-                print(f"      카테고리  : {p.category}")
-                print(f"      태그      : {[t.tag_name for t in p.tags]}")
+            print(f"최종 추천 {len(places)}개\n")
+            for i, p in enumerate(places, 1):
+                print(f"  [{i}] place_id={p['place_id']}  [{p.get('match_type', 'curated')}]")
+                print(f"      카테고리: {p.get('category')}")
+                print(f"      태그    : {p.get('tags')}")
+                print(f"      유사도  : {p.get('similarity')}")
                 print()
+            print(f"AI 요약\n  {result.get('ai_summary', '')}")
             return
 
         # ── 이름 매칭 시 RAG 건너뜀 (place_router.py search_places 동일 로직) ──
@@ -908,8 +953,7 @@ if __name__ == "__main__":
 
     # [관광명소] 가족 나들이
     _run_test(
-        keyword="가족끼리 나들이 가기 좋은 자연 풍경 명소",
+        keyword="자연 풍경 명소 추천",
         category="TOURIST_SPOT",
-        weather_info={"condition": "맑음", "temperature": 22},
-        regions=["중구"]
+        regions=["달성군"]
     )
