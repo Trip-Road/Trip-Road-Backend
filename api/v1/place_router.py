@@ -1,7 +1,7 @@
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date as date_class
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,7 +16,12 @@ from models.user import User
 from schemas.request import PlaceSearchRequest
 from schemas.response import PlaceCardResponse, PlaceDetailResponse
 from services.landmarks import find_landmark
-from services.place_service import attach_place_info, get_filtered_place_ids, get_name_match_ids, get_place_detail_info
+from services.place_service import (
+    attach_place_info,
+    get_filtered_place_ids,
+    get_name_match_ids,
+    get_place_detail_info,
+)
 from services.rag_graph import run_rag
 from services.weather_service import get_current_weather, get_forecast_weather, get_mid_term_weather
 
@@ -34,6 +39,7 @@ def _weather_to_keyword(weather_info: dict) -> str:
             return "추운 날씨 따뜻한 실내 카페 추천"
         return "맑은 날 야외 나들이 추천 장소"
     return "오늘 날씨에 어울리는 대구 추천 장소"
+
 
 router = APIRouter()
 
@@ -84,9 +90,9 @@ def search_places(
 
     # 1차 필터링(MySQL) + 날씨 조회 병렬 실행
     with ThreadPoolExecutor(max_workers=1) as executor:
-        weather_future  = executor.submit(_fetch_weather)
+        weather_future = executor.submit(_fetch_weather)
         valid_place_ids = get_filtered_place_ids(db, request)
-        weather_info    = weather_future.result()
+        weather_info = weather_future.result()
 
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": []}
@@ -107,7 +113,7 @@ def search_places(
         .first()
     )
     if existing_history:
-        existing_history.created_at = datetime.now()
+        existing_history.created_at = datetime.now(timezone.utc)
     else:
         db.add(SearchHistory(user_id=current_user.user_id, keyword=request.keyword))
     db.commit()
@@ -134,12 +140,12 @@ def search_places(
         )
         places = [
             {
-                "place_id"  : p.place_id,
-                "name"      : p.name,
-                "category"  : p.category,
-                "tags"      : [t.tag_name for t in p.tags],
+                "place_id": p.place_id,
+                "name": p.name,
+                "category": p.category,
+                "tags": [t.tag_name for t in p.tags],
                 "similarity": None,
-                "image"     : p.image_url,
+                "image": p.image_url,
                 "match_type": "location",
             }
             for p in places_raw
@@ -149,17 +155,20 @@ def search_places(
     # 2차: 이름 직접 매칭 확인 → 있으면 RAG 없이 즉시 반환
     name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
     if name_match_ids:
-        places_raw = db.query(Place).options(joinedload(Place.tags)).filter(
-            Place.place_id.in_(name_match_ids)
-        ).all()
+        places_raw = (
+            db.query(Place)
+            .options(joinedload(Place.tags))
+            .filter(Place.place_id.in_(name_match_ids))
+            .all()
+        )
         places = [
             {
-                "place_id"  : p.place_id,
-                "name"      : p.name,
-                "category"  : p.category,
-                "tags"      : [t.tag_name for t in p.tags],
+                "place_id": p.place_id,
+                "name": p.name,
+                "category": p.category,
+                "tags": [t.tag_name for t in p.tags],
                 "similarity": 1.0,
-                "image"     : p.image_url,
+                "image": p.image_url,
                 "match_type": "name_match",
             }
             for p in places_raw
@@ -170,7 +179,7 @@ def search_places(
     visit_context = {
         "target_date": request.target_date,
         "target_time": request.target_time,
-        "category"   : request.category,
+        "category": request.category,
     }
     result = run_rag(
         keyword=request.keyword,
@@ -235,11 +244,11 @@ def get_recommendations(
         )
         places = [
             {
-                "place_id"  : p.place_id,
-                "name"      : p.name,
-                "category"  : p.category,
-                "tags"      : [t.tag_name for t in p.tags],
-                "image"     : p.image_url,
+                "place_id": p.place_id,
+                "name": p.name,
+                "category": p.category,
+                "tags": [t.tag_name for t in p.tags],
+                "image": p.image_url,
                 "match_type": "location",
             }
             for p in places_raw
@@ -282,9 +291,8 @@ def get_recommendations(
         )
         if matched_place:
             tags_str = ", ".join([t.tag_name for t in matched_place.tags])
-            keyword = (
-                f"{keyword}과 비슷한 분위기의 {matched_place.category or ''}"
-                + (f" (태그: {tags_str})" if tags_str else "")
+            keyword = f"{keyword}과 비슷한 분위기의 {matched_place.category or ''}" + (
+                f" (태그: {tags_str})" if tags_str else ""
             )
             valid_place_ids = [pid for pid in valid_place_ids if pid not in set(name_match_ids)]
         name_match_ids = []
