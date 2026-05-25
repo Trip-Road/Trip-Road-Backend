@@ -121,11 +121,13 @@ question 작성 규칙:
 primary_keywords 작성 규칙:
 - 사용자가 이 검색을 하는 핵심 이유 — 반드시 충족돼야 하는 것
 - 특정 메뉴·음식·경험(브런치, 카이막 등) 또는 available_tags 중 검색의 주목적인 것(소개팅, 공부/독서 등) 포함 가능
+- 특정 건물·외국 명소·랜드마크(에펠탑, 남산타워, 해운대 등) 이름이 검색의 핵심이라면 해당 이름을 primary에 그대로 포함하세요 — 뷰맛집 등 유사 태그로 대체하지 마세요
 - 그룹 내 식이 제한이 있는 경우, 가장 제약이 강한 조건(채식주의자, 알레르기 등)을 primary로 — 그 조건을 못 맞추면 선택지가 없기 때문
 - 예: "카이막에 도전하고 싶은데 커피도 맛있는 카페" → ["카이막"]
 - 예: "소개팅 장소, 대화 이어지면 브런치도 먹고 싶어" → ["소개팅", "브런치"]
 - 예: "카공하기 좋은 조용한 카페" → ["공부/독서"]  (available_tags에서 핵심 목적)
 - 예: "채식주의자 + 고기 원하는 사람 혼재" → ["채식"] (채식 메뉴 보유가 핵심 제약)
+- 예: "에펠탑이 보이는 카페" → ["에펠탑"] (대구에 없더라도 원문 그대로)
 - 단순 분위기·장소 유형은 제외 (조용한, 아늑한 등은 secondary로)
 - 없으면 빈 배열 []
 
@@ -370,6 +372,27 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     }
     sorted_candidates = sorted(candidates, key=lambda p: _PRIORITY[_match_type(p)])
 
+    # primary_str을 no_exact_note보다 먼저 정의해야 f-string에서 참조 가능
+    primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
+    secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
+
+    exact_count    = sum(1 for p in sorted_candidates if _match_type(p) == "exact")
+    relevant_count = sum(1 for p in sorted_candidates if _match_type(p) == "relevant")
+    no_exact_note  = ""
+    # primary가 있는데 exact 0개: 핵심 조건을 찾지 못한 경우
+    # primary가 없고 전부 curated: 어떤 키워드도 매칭되지 않은 경우
+    _primary_unmatched = bool(primary_kws) and exact_count == 0
+    _all_curated       = bool(sorted_candidates) and exact_count == 0 and relevant_count == 0
+    if _primary_unmatched or _all_curated:
+        search_term = primary_str if primary_kws else state["keyword"]
+        no_exact_note = (
+            f"⚠️ 중요: [{search_term}]은(는) 대구 데이터 안에서 찾을 수 없었습니다. "
+            f"summary 첫 문장에 반드시 이 사실을 명시하고, "
+            f"이곳과 유사한 분위기·취향을 가진 장소들을 추천했다는 점을 설명하세요. "
+            f"예시: '대구 데이터에서 {search_term}을(를) 제공하는 장소를 찾지 못했지만, "
+            f"이와 유사한 분위기와 취향을 가진 곳들을 추천해드립니다.'\n"
+        )
+
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
         f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}"
@@ -403,9 +426,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     visit_line = f"\n방문 조건: {', '.join(visit_parts)}{weather_context}\n" if visit_parts else ""
 
-    # primary/secondary/exclusion 키워드를 프롬프트에 명시
-    primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
-    secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
+    # primary/secondary 키워드를 프롬프트에 명시
     kw_line = (
         f"핵심 아이템(primary, 반드시 보유): {primary_str}\n"
         f"부가 아이템(secondary, 있으면 좋음): {secondary_str}\n"
@@ -428,6 +449,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
         f"- [RELEVANT] 장소: primary({primary_str}) 보유 여부는 리뷰에서 확인되지 않았습니다. "
         f"절대 보유한다고 단정하지 말고, '다양한 메뉴 구성으로 선택 가능성이 있습니다' 같은 가능성 표현을 쓰세요.\n"
         f"- [CURATED] 장소: 아무 아이템도 없지만 사용자 태그·분위기에 맞게 선별된 곳입니다.\n"
+        f"{no_exact_note}"
         f"위 구분을 지키면서 날씨·카테고리 등 반영 요소를 포함해 2-3문장으로 작성하세요.\n"
         f"- 장소 이름은 절대 언급하지 마세요. 분위기·특징·추천 이유만 설명하세요.\n"
         f"순서 규칙: [NAME_MATCH] → [EXACT] → [RELEVANT] → [CURATED] 순으로 places 배열에 배치하세요.\n"
