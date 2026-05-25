@@ -151,7 +151,7 @@ def search_places(
             visit_context=visit_context,
             name_match_ids=name_match_ids,
         )
-        places = attach_place_info(result["places"], db)
+        places = attach_place_info(result["places"], db, user_fav_ids)
 
         # 10개 미만이면 선호태그 포함 장소로 채우기
         if len(places) < 10:

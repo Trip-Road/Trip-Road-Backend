@@ -27,6 +27,7 @@ def attach_place_info(rag_places: list[dict], db: Session, user_fav_ids: set = N
     """RAG 결과에 MySQL에서 조회한 name, image를 붙이고 summary를 제거한다."""
     if not rag_places:
         return []
+    user_fav_ids = set(user_fav_ids) if user_fav_ids else set()
 
     place_ids = [p["place_id"] for p in rag_places]
     rows = (
