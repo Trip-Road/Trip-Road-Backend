@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from fastapi import APIRouter
 
@@ -12,8 +12,39 @@ def get_main_weather():
     """
     메인 화면용 대구 전체 날씨를 조회
     """
-    weather_data = get_current_weather("대구전체")
-    return {"message": "날씨 조회 성공", "data": weather_data}
+    region_name = "대구전체"
+    target_time = time(14, 0)
+    today = date.today()
+
+    weather_list = []
+
+    for i in range(7):
+        target_date = today + timedelta(days=i)
+
+        if i == 0:
+            w_info = get_current_weather(region_name)
+        elif 1 <= i <= 2:
+            w_info = get_forecast_weather(region_name, target_date, target_time)
+        else:
+            w_info = get_mid_term_weather(target_date, target_time)
+
+        if w_info and "error" not in w_info:
+            w_info["target_date"] = target_date.strftime("%Y-%m-%d")
+            weather_list.append(w_info)
+        else:
+            weather_list.append(
+                {
+                    "region": region_name,
+                    "target_date": target_date.strftime("%Y-%m-%d"),
+                    "temperature": None,
+                    "condition": "알수없음",
+                    "error": w_info.get("error", "데이터를 불러오지 못했습니다.")
+                    if w_info
+                    else "오류 발생",
+                }
+            )
+
+    return {"message": "날씨 조회 성공", "data": weather_list}
 
 
 @router.get("/test/forecast")
