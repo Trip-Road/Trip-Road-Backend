@@ -396,7 +396,9 @@ def get_recommendations(
                 "name": p.name,
                 "category": p.category,
                 "tags": [t.tag_name for t in p.tags],
+                "similarity": None,
                 "image": p.image_url,
+                "match_type": "location",
                 "is_favorite": p.place_id in user_fav_ids,
             }
             for p in places_raw
