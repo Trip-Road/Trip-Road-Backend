@@ -233,7 +233,7 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
         return {
             "place_id"        : int(m["place_id"]),
             "category"        : m.get("category", ""),
-            "tags"            : [t for t in m.get("tags", "").split(",") if t],
+            "tags"            : [t if t.startswith("#") else f"#{t}" for t in m.get("tags", "").split(",") if t],
             "summary"         : doc,
             "similarity"      : round(1 - dist, 4),
             "matched_primary" : matched_primary,
