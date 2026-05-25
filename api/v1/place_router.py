@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from api.deps import get_current_user
 from db.mysql import get_db
-from models.history_and_event import SearchHistory
+from models.history_and_event import FavoritePlace, SearchHistory
 from models.place import Place
 from models.tag import Tag
 from models.user import User
@@ -98,10 +98,18 @@ def search_places(
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": []}
 
+    user_fav_rows = (
+        db.query(FavoritePlace.place_id).filter(FavoritePlace.user_id == current_user.user_id).all()
+    )
+    user_fav_ids = {row[0] for row in user_fav_rows}
+
     if not request.keyword:
         return {
             "message": "검색 완료",
-            "places": [{"place_id": pid} for pid in valid_place_ids[:10]],
+            "places": [
+                {"place_id": pid, "is_favorite": pid in user_fav_ids}
+                for pid in valid_place_ids[:10]
+            ],
         }
 
     # 검색어 저장 및 관리
@@ -163,15 +171,18 @@ def search_places(
                     .all()
                 )
                 for p in random.sample(tagged_rows, min(remaining, len(tagged_rows))):
-                    fallback.append({
-                        "place_id": p.place_id,
-                        "name": p.name,
-                        "category": p.category,
-                        "tags": [t.tag_name for t in p.tags],
-                        "similarity": None,
-                        "image": p.image_url,
-                        "match_type": "location",
-                    })
+                    fallback.append(
+                        {
+                            "place_id": p.place_id,
+                            "name": p.name,
+                            "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None,
+                            "image": p.image_url,
+                            "match_type": "location",
+                            "is_favorite": p.place_id in user_fav_ids,
+                        }
+                    )
                 existing_ids.update(p["place_id"] for p in fallback)
 
             # 선호태그로도 모자라면 valid_place_ids 내 나머지 랜덤으로
@@ -187,19 +198,26 @@ def search_places(
                     .all()
                 )
                 for p in random.sample(any_rows, min(remaining, len(any_rows))):
-                    fallback.append({
-                        "place_id": p.place_id,
-                        "name": p.name,
-                        "category": p.category,
-                        "tags": [t.tag_name for t in p.tags],
-                        "similarity": None,
-                        "image": p.image_url,
-                        "match_type": "location",
-                    })
+                    fallback.append(
+                        {
+                            "place_id": p.place_id,
+                            "name": p.name,
+                            "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None,
+                            "image": p.image_url,
+                            "match_type": "location",
+                            "is_favorite": p.place_id in user_fav_ids,
+                        }
+                    )
 
             places.extend(fallback)
 
-        return {"message": "검색 완료", "places": places, "ai_summary": result.get("ai_summary", "")}
+        return {
+            "message": "검색 완료",
+            "places": places,
+            "ai_summary": result.get("ai_summary", ""),
+        }
 
     # 2차: 이름 직접 매칭 확인 → 있으면 RAG 없이 즉시 반환
     name_match_ids = get_name_match_ids(db, request.keyword, valid_place_ids)
@@ -219,6 +237,7 @@ def search_places(
                 "similarity": 1.0,
                 "image": p.image_url,
                 "match_type": "name_match",
+                "is_favorite": p.place_id in user_fav_ids,
             }
             for p in places_raw
         ]
@@ -237,7 +256,7 @@ def search_places(
         visit_context=visit_context,
     )
 
-    places = attach_place_info(result["places"], db)
+    places = attach_place_info(result["places"], db, user_fav_ids)
     return {"message": "검색 완료", "places": places, "ai_summary": result["ai_summary"]}
 
 
@@ -282,6 +301,11 @@ def get_recommendations(
     if not valid_place_ids:
         return {"message": "조건에 맞는 장소가 없습니다.", "places": [], "ai_summary": ""}
 
+    user_fav_rows = (
+        db.query(FavoritePlace.place_id).filter(FavoritePlace.user_id == current_user.user_id).all()
+    )
+    user_fav_ids = {row[0] for row in user_fav_rows}
+
     # TOURIST_SPOT: keyword + 선호태그 활용, RAG 실행 후 부족하면 랜덤으로 채움
     if category == "TOURIST_SPOT":
         places = []
@@ -295,7 +319,7 @@ def get_recommendations(
                 weather_info=weather_info,
                 visit_context={"category": category},
             )
-            places = attach_place_info(result["places"], db)
+            places = attach_place_info(result["places"], db, user_fav_ids)
             ai_summary = result.get("ai_summary", "")
 
         # 10개 미만이면 선호태그 풀(valid_place_ids)에서 랜덤으로 채우기
@@ -314,15 +338,18 @@ def get_recommendations(
                     .all()
                 )
                 for p in rows:
-                    fallback.append({
-                        "place_id": p.place_id,
-                        "name": p.name,
-                        "category": p.category,
-                        "tags": [t.tag_name for t in p.tags],
-                        "similarity": None,
-                        "image": p.image_url,
-                        "match_type": "location",
-                    })
+                    fallback.append(
+                        {
+                            "place_id": p.place_id,
+                            "name": p.name,
+                            "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None,
+                            "image": p.image_url,
+                            "match_type": "location",
+                            "is_favorite": p.place_id in user_fav_ids,
+                        }
+                    )
                 existing_ids.update(p["place_id"] for p in fallback)
 
             # 선호태그 풀에서도 모자라면 전체 TOURIST_SPOT에서 랜덤
@@ -338,15 +365,18 @@ def get_recommendations(
                     .all()
                 )
                 for p in random.sample(any_rows, min(remaining, len(any_rows))):
-                    fallback.append({
-                        "place_id": p.place_id,
-                        "name": p.name,
-                        "category": p.category,
-                        "tags": [t.tag_name for t in p.tags],
-                        "similarity": None,
-                        "image": p.image_url,
-                        "match_type": "location",
-                    })
+                    fallback.append(
+                        {
+                            "place_id": p.place_id,
+                            "name": p.name,
+                            "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None,
+                            "image": p.image_url,
+                            "match_type": "location",
+                            "is_favorite": p.place_id in user_fav_ids,
+                        }
+                    )
 
             places.extend(fallback)
 
@@ -367,6 +397,7 @@ def get_recommendations(
                 "category": p.category,
                 "tags": [t.tag_name for t in p.tags],
                 "image": p.image_url,
+                "is_favorite": p.place_id in user_fav_ids,
             }
             for p in places_raw
         ]
@@ -403,7 +434,7 @@ def get_recommendations(
         name_match_ids=name_match_ids,
     )
 
-    places = attach_place_info(result["places"], db)
+    places = attach_place_info(result["places"], db, user_fav_ids)
     return {"message": "추천 완료", "places": places, "ai_summary": result["ai_summary"]}
 
 

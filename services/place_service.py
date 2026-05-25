@@ -23,29 +23,34 @@ def get_name_match_ids(db: Session, keyword: str, valid_ids: list[int]) -> list[
     return [row[0] for row in rows]
 
 
-def attach_place_info(rag_places: list[dict], db: Session) -> list[dict]:
+def attach_place_info(rag_places: list[dict], db: Session, user_fav_ids: set = None) -> list[dict]:
     """RAG 결과에 MySQL에서 조회한 name, image를 붙이고 summary를 제거한다."""
     if not rag_places:
         return []
 
     place_ids = [p["place_id"] for p in rag_places]
-    rows = db.query(Place.place_id, Place.name, Place.image_url).filter(
-        Place.place_id.in_(place_ids)
-    ).all()
+    rows = (
+        db.query(Place.place_id, Place.name, Place.image_url)
+        .filter(Place.place_id.in_(place_ids))
+        .all()
+    )
     info_map = {row.place_id: {"name": row.name, "image": row.image_url or None} for row in rows}
 
     result = []
     for p in rag_places:
         info = info_map.get(p["place_id"], {})
-        result.append({
-            "place_id"  : p["place_id"],
-            "name"      : info.get("name"),
-            "category"  : p["category"],
-            "tags"      : p["tags"],
-            "similarity": p["similarity"],
-            "image"     : info.get("image"),
-            "match_type": p.get("match_type", "curated"),
-        })
+        result.append(
+            {
+                "place_id": p["place_id"],
+                "name": info.get("name"),
+                "category": p["category"],
+                "tags": p["tags"],
+                "similarity": p["similarity"],
+                "image": info.get("image"),
+                "match_type": p.get("match_type", "curated"),
+                "is_favorite": p["place_id"] in user_fav_ids,
+            }
+        )
     return result
 
 
