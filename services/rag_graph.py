@@ -101,6 +101,14 @@ _AVAILABLE_TAGS = (
     "고즈넉한, 여유로운, 이색적인, 신비로운, 깔끔한/현대적인"
 )
 
+# _AVAILABLE_TAGS에서 태그명만 추출한 집합 — no_exact_note 발동 조건 판별에 사용
+_ALL_TAG_NAMES: frozenset[str] = frozenset(
+    tag.strip()
+    for line in _AVAILABLE_TAGS.split("\n")
+    for part in line.split(":", 1)[-1].split(",")
+    if (tag := part.strip())
+)
+
 _REWRITE_SYSTEM = f"""당신은 장소 추천 검색 전문가입니다.
 사용자의 자연어 질문을 분석하여 아래 JSON 형식으로 응답하세요.
 
@@ -128,7 +136,8 @@ primary_keywords 작성 규칙:
 - 예: "카공하기 좋은 조용한 카페" → ["공부/독서"]  (available_tags에서 핵심 목적)
 - 예: "채식주의자 + 고기 원하는 사람 혼재" → ["채식"] (채식 메뉴 보유가 핵심 제약)
 - 예: "에펠탑이 보이는 카페" → ["에펠탑"] (대구에 없더라도 원문 그대로)
-- 단순 분위기·장소 유형은 제외 (조용한, 아늑한 등은 secondary로)
+- 예: "강아지 데리고 밥 먹을 수 있는 야외 테라스 식당" → ["반려동물동반", "야외/테라스"] (둘 다 없으면 목적 자체가 불가능한 시설 조건)
+- 단순 분위기·감성 형용사(조용한, 아늑한, 활기찬, 로맨틱한 등)는 secondary로 — 시설·공간 조건(야외/테라스, 반려동물동반 등)과 구분할 것
 - 없으면 빈 배열 []
 
 secondary_keywords 작성 규칙:
@@ -344,13 +353,29 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
         except Exception:
             pass
 
-    # 5) exclusion_keywords: summary에 기피 키워드가 포함된 후보 제거
+    # 5) exclusion_keywords: summary 텍스트 + 태그 모두 체크해서 기피 후보 제거
     exclusion_kws = state.get("exclusion_keywords") or []
     if exclusion_kws:
+        exclusion_tag_kws = {kw for kw in exclusion_kws if kw in _ALL_TAG_NAMES}
         candidates = [
             c for c in candidates
             if not any(kw in c["summary"] for kw in exclusion_kws)
+            and not (exclusion_tag_kws & {t.lstrip("#") for t in c.get("tags", [])})
         ]
+
+    # 6) 태그명 primary 키워드: 텍스트 매칭 외에 후보의 태그 메타데이터로도 matched_primary 보정
+    #    리뷰 텍스트에 단어가 없어도 태그로 보유 중이면 exact/relevant로 올바르게 분류
+    primary_kws_raw = state.get("primary_keywords") or []
+    tag_primary_kws = [kw for kw in primary_kws_raw if kw in _ALL_TAG_NAMES]
+    if tag_primary_kws:
+        for c in candidates:
+            candidate_tag_names = {t.lstrip("#") for t in c.get("tags", [])}
+            tag_hit = sum(1 for kw in tag_primary_kws if kw in candidate_tag_names)
+            if tag_hit:
+                c["matched_primary"] = min(
+                    c.get("matched_primary", 0) + tag_hit,
+                    c.get("total_primary", len(primary_kws_raw)),
+                )
 
     return {"candidates": candidates}
 
@@ -379,10 +404,12 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     exact_count    = sum(1 for p in sorted_candidates if _match_type(p) == "exact")
     relevant_count = sum(1 for p in sorted_candidates if _match_type(p) == "relevant")
     no_exact_note  = ""
-    # primary가 있는데 exact 0개: 핵심 조건을 찾지 못한 경우
-    # primary가 없고 전부 curated: 어떤 키워드도 매칭되지 않은 경우
-    _primary_unmatched = bool(primary_kws) and exact_count == 0
-    _all_curated       = bool(sorted_candidates) and exact_count == 0 and relevant_count == 0
+    # primary 키워드가 정의된 태그명이면 해당 속성은 대구 데이터에 실제로 존재하는 것이므로
+    # 텍스트 매칭 결과와 무관하게 "찾지 못했다" 안내를 발동하지 않는다.
+    # 태그에도 없고 텍스트 매칭도 안 된 경우(에펠탑 등)에만 발동.
+    _primary_has_tag   = bool(primary_kws) and any(kw in _ALL_TAG_NAMES for kw in primary_kws)
+    _primary_unmatched = bool(primary_kws) and exact_count == 0 and not _primary_has_tag
+    _all_curated       = bool(sorted_candidates) and exact_count == 0 and relevant_count == 0 and not _primary_has_tag
     if _primary_unmatched or _all_curated:
         search_term = primary_str if primary_kws else state["keyword"]
         no_exact_note = (
@@ -974,8 +1001,22 @@ if __name__ == "__main__":
     # )
 
     # [관광명소] 가족 나들이
-    _run_test(
-        keyword="자연 풍경 명소 추천",
-        category="TOURIST_SPOT",
-        regions=["달성군"]
-    )
+    # _run_test(
+    #     keyword="자연 풍경 명소 추천",
+    #     category="TOURIST_SPOT",
+    #     regions=["달성군"]
+    # )
+
+    # [이모지] 버거+감자튀김 이모지 — 이모지 입력 시 LLM 키워드 추출 확인
+    # _run_test(
+    #     keyword="🍔🍟",
+    #     category="restaurant",
+    # )
+
+    # [no_exact_note 수정 검증]
+    # 태그명 primary → note 발동 안 해야 함
+    # _run_test(keyword="처음 만나는 소개팅 자리에 어울리는 아늑한 식당", category="restaurant")
+    _run_test(keyword="강아지 데리고 밥 먹을 수 있는 야외 테라스 식당", category="restaurant")
+    # _run_test(keyword="부모님 모시고 갈 조용하고 고급스러운 한식당", category="restaurant")
+    # 실존하지 않는 것 → note 발동해야 함
+    # _run_test(keyword="에펠탑이 보이는 카페", category="cafe")
