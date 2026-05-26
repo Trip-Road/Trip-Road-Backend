@@ -101,6 +101,9 @@ _AVAILABLE_TAGS = (
     "고즈넉한, 여유로운, 이색적인, 신비로운, 깔끔한/현대적인"
 )
 
+# 음식 종류 태그 — primary에 하나가 지정되면 나머지는 충돌 카테고리로 취급해 후보에서 제거
+_CUISINE_TAGS: frozenset[str] = frozenset({"한식", "양식", "일식", "중식", "분식", "주점/안주"})
+
 # _AVAILABLE_TAGS에서 태그명만 추출한 집합 — no_exact_note 발동 조건 판별에 사용
 _ALL_TAG_NAMES: frozenset[str] = frozenset(
     tag.strip()
@@ -363,9 +366,20 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             and not (exclusion_tag_kws & {t.lstrip("#") for t in c.get("tags", [])})
         ]
 
-    # 6) 태그명 primary 키워드: 텍스트 매칭 외에 후보의 태그 메타데이터로도 matched_primary 보정
-    #    리뷰 텍스트에 단어가 없어도 태그로 보유 중이면 exact/relevant로 올바르게 분류
+    # 6) 음식 종류 충돌 필터: primary에 특정 음식 종류(한식/일식 등)가 지정된 경우
+    #    다른 음식 종류 태그를 가진 후보를 제거 (한식 요청인데 일식집 추천 방지)
     primary_kws_raw = state.get("primary_keywords") or []
+    # LLM이 "고급스러운 한식"처럼 compound로 만들 수 있으므로 포함 여부로 체크
+    cuisine_primaries = {tag for tag in _CUISINE_TAGS if any(tag in kw for kw in primary_kws_raw)}
+    if cuisine_primaries:
+        conflicting = _CUISINE_TAGS - cuisine_primaries
+        candidates = [
+            c for c in candidates
+            if not (conflicting & {t.lstrip("#") for t in c.get("tags", [])})
+        ]
+
+    # 7) 태그명 primary 키워드: 텍스트 매칭 외에 후보의 태그 메타데이터로도 matched_primary 보정
+    #    리뷰 텍스트에 단어가 없어도 태그로 보유 중이면 exact/relevant로 올바르게 분류
     tag_primary_kws = [kw for kw in primary_kws_raw if kw in _ALL_TAG_NAMES]
     if tag_primary_kws:
         for c in candidates:
@@ -407,7 +421,10 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     # primary 키워드가 정의된 태그명이면 해당 속성은 대구 데이터에 실제로 존재하는 것이므로
     # 텍스트 매칭 결과와 무관하게 "찾지 못했다" 안내를 발동하지 않는다.
     # 태그에도 없고 텍스트 매칭도 안 된 경우(에펠탑 등)에만 발동.
-    _primary_has_tag   = bool(primary_kws) and any(kw in _ALL_TAG_NAMES for kw in primary_kws)
+    # LLM이 "고급스러운 한식"처럼 compound로 만들 수 있으므로 포함 여부로 체크
+    _primary_has_tag   = bool(primary_kws) and any(
+        tag in kw for kw in primary_kws for tag in _ALL_TAG_NAMES
+    )
     _primary_unmatched = bool(primary_kws) and exact_count == 0 and not _primary_has_tag
     _all_curated       = bool(sorted_candidates) and exact_count == 0 and relevant_count == 0 and not _primary_has_tag
     if _primary_unmatched or _all_curated:
@@ -1016,7 +1033,7 @@ if __name__ == "__main__":
     # [no_exact_note 수정 검증]
     # 태그명 primary → note 발동 안 해야 함
     # _run_test(keyword="처음 만나는 소개팅 자리에 어울리는 아늑한 식당", category="restaurant")
-    _run_test(keyword="강아지 데리고 밥 먹을 수 있는 야외 테라스 식당", category="restaurant")
-    # _run_test(keyword="부모님 모시고 갈 조용하고 고급스러운 한식당", category="restaurant")
+    # _run_test(keyword="강아지 데리고 밥 먹을 수 있는 야외 테라스 식당", category="restaurant")
+    _run_test(keyword="부모님 모시고 갈 조용하고 고급스러운 한식당", category="restaurant")
     # 실존하지 않는 것 → note 발동해야 함
     # _run_test(keyword="에펠탑이 보이는 카페", category="cafe")
