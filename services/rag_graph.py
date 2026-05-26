@@ -11,8 +11,8 @@ MySQL 1차 필터로 걸러진 valid_ids를 받아 후처리를 수행한다.
 run_rag() 함수만 외부에 노출한다.
 """
 
-import sys
 import os
+import sys
 
 # Windows 터미널 한글 출력 보장 (import 전에 먼저 설정)
 if hasattr(sys.stdout, "reconfigure"):
@@ -33,10 +33,10 @@ from db.chroma import get_chroma_client
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 
-COLLECTION_NAME      = "place_reviews"
-EMBED_MODEL          = "text-embedding-3-small"
-CHAT_MODEL           = "gpt-4o-mini"
-N_CANDIDATES         = 20
+COLLECTION_NAME = "place_reviews"
+EMBED_MODEL = "text-embedding-3-small"
+CHAT_MODEL = "gpt-4o-mini"
+N_CANDIDATES = 20
 
 # ── OpenAI 싱글톤 ──────────────────────────────────────────────────────────────
 
@@ -52,7 +52,9 @@ def _client() -> OpenAI:
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────────
 
-_INTERNAL_KEYS = frozenset({"matched_primary", "total_primary", "matched_secondary", "summary", "is_name_match"})
+_INTERNAL_KEYS = frozenset(
+    {"matched_primary", "total_primary", "matched_secondary", "summary", "is_name_match"}
+)
 
 
 def _match_type(p: dict) -> str:
@@ -70,20 +72,21 @@ def _match_type(p: dict) -> str:
 
 # ── GraphState ────────────────────────────────────────────────────────────────
 
+
 class PlaceRAGState(TypedDict):
-    keyword            : str        # 원본 사용자 입력 (불변)
-    question           : str        # rewrite 이후 최적화된 검색 쿼리
-    primary_keywords   : list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
-    secondary_keywords : list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
-    exclusion_keywords : list[str]  # 주력 메뉴·특색이면 추천 불가 (알레르기·기피 재료 등)
-    name_match_ids     : list[int]  # 가게 이름이 키워드와 일치하는 장소 ID (1순위 배치)
-    embedding          : list[float] # rewrite와 병렬로 미리 계산된 임베딩
-    valid_ids          : list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
-    candidates         : list[dict] # ChromaDB retrieve 결과 (상위 N개)
-    results            : list[dict] # 최종 추천 결과
-    ai_summary         : str        # 전체 추천 결과에 대한 AI 요약
-    weather_info       : dict       # 날씨 정보 (temperature, condition) — 없으면 {}
-    visit_context      : dict       # 방문 조건 (target_date, target_time, category) — 없으면 {}
+    keyword: str  # 원본 사용자 입력 (불변)
+    question: str  # rewrite 이후 최적화된 검색 쿼리
+    primary_keywords: list[str]  # 반드시 보유해야 할 핵심 아이템 (rewrite 단계 추출)
+    secondary_keywords: list[str]  # 있으면 좋은 부가 아이템 (rewrite 단계 추출)
+    exclusion_keywords: list[str]  # 주력 메뉴·특색이면 추천 불가 (알레르기·기피 재료 등)
+    name_match_ids: list[int]  # 가게 이름이 키워드와 일치하는 장소 ID (1순위 배치)
+    embedding: list[float]  # rewrite와 병렬로 미리 계산된 임베딩
+    valid_ids: list[int]  # MySQL 1차 필터 결과 (입력으로 주입)
+    candidates: list[dict]  # ChromaDB retrieve 결과 (상위 N개)
+    results: list[dict]  # 최종 추천 결과
+    ai_summary: str  # 전체 추천 결과에 대한 AI 요약
+    weather_info: dict  # 날씨 정보 (temperature, condition) — 없으면 {}
+    visit_context: dict  # 방문 조건 (target_date, target_time, category) — 없으면 {}
 
 
 # ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
@@ -158,10 +161,11 @@ secondary_keywords 작성 규칙:
 exclusion_keywords 작성 규칙:
 - 사용자가 명시한 알레르기 유발 식품·재료 (해산물, 견과류, 유제품, 글루텐 등) 추출
 - 명시적 기피 음식·재료 (고수, 내장, 특정 재료 등) 추출
+- 해당 조건에 걸리는 유의어, 하위 재료, 대표적인 음식 이름까지 최대한 구체적으로 확장하여 추출할 것.
 - 추출 기준: 이 항목이 장소의 주력 메뉴이거나 주된 특색이라면 추천하면 안 되는 것
 - 단순 취향·분위기(조용한, 격식 등)는 포함하지 말 것
-- 예: "해산물 알레르기 있는 팀원이 있어" → ["해산물"]
-- 예: "견과류 알레르기 있고 유제품 못 먹어" → ["견과류", "유제품"]
+- 예: "해산물 알레르기 있는 팀원이 있어" → ["해산물", "해물", "생선", "조개", "새우", "연어", "회", "초밥", "스시"]
+- 예: "견과류 알레르기 있고 유제품 못 먹어" → ["견과류", "땅콩", "호두", "아몬드", "유제품", "우유", "치즈", "버터", "크림"]
 - 없으면 빈 배열 []
 
 available_tags:
@@ -169,6 +173,7 @@ available_tags:
 
 
 # ── 노드 ─────────────────────────────────────────────────────────────────────
+
 
 def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     """구어체 키워드 → 벡터 검색 최적화 문장 + 핵심 아이템 키워드 추출
@@ -180,23 +185,19 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": _REWRITE_SYSTEM},
-                {"role": "user",   "content": keyword},
+                {"role": "user", "content": keyword},
             ],
             temperature=0,
             response_format={"type": "json_object"},
         )
 
     def _do_embed():
-        return (
-            _client().embeddings
-            .create(model=EMBED_MODEL, input=[keyword])
-            .data[0].embedding
-        )
+        return _client().embeddings.create(model=EMBED_MODEL, input=[keyword]).data[0].embedding
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         rewrite_future = executor.submit(_do_rewrite)
-        embed_future   = executor.submit(_do_embed)
-        resp      = rewrite_future.result()
+        embed_future = executor.submit(_do_embed)
+        resp = rewrite_future.result()
         embedding = embed_future.result()
 
     try:
@@ -204,23 +205,23 @@ def _node_rewrite(state: PlaceRAGState) -> PlaceRAGState:
     except Exception:
         raw = {}
 
-    question           = raw.get("question", keyword).strip() or keyword
-    primary_keywords   = raw.get("primary_keywords", [])
+    question = raw.get("question", keyword).strip() or keyword
+    primary_keywords = raw.get("primary_keywords", [])
     secondary_keywords = raw.get("secondary_keywords", [])
     exclusion_keywords = raw.get("exclusion_keywords", [])
 
     return {
-        "question"          : question,
-        "primary_keywords"  : primary_keywords,
+        "question": question,
+        "primary_keywords": primary_keywords,
         "secondary_keywords": secondary_keywords,
         "exclusion_keywords": exclusion_keywords,
-        "embedding"         : embedding,
+        "embedding": embedding,
     }
 
 
 def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     """ChromaDB 시맨틱 검색 + 아이템 텍스트 직접 검색 (valid_ids 범위 내)"""
-    question  = state["question"]
+    question = state["question"]
     valid_ids = state["valid_ids"]
 
     if not valid_ids:
@@ -229,9 +230,7 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     embedding = state.get("embedding") or []
     if not embedding:
         embedding = (
-            _client().embeddings
-            .create(model=EMBED_MODEL, input=[question])
-            .data[0].embedding
+            _client().embeddings.create(model=EMBED_MODEL, input=[question]).data[0].embedding
         )
 
     try:
@@ -239,19 +238,26 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     except Exception:
         return {"candidates": []}
 
-    where_ids  = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
+    where_ids = {"place_id": {"$in": [str(pid) for pid in valid_ids]}}
 
-    def _to_candidate(m: dict, doc: str, dist: float,
-                       matched_primary: int = 0, total_primary: int = 0,
-                       matched_secondary: int = 0) -> dict:
+    def _to_candidate(
+        m: dict,
+        doc: str,
+        dist: float,
+        matched_primary: int = 0,
+        total_primary: int = 0,
+        matched_secondary: int = 0,
+    ) -> dict:
         return {
-            "place_id"        : int(m["place_id"]),
-            "category"        : m.get("category", ""),
-            "tags"            : [t if t.startswith("#") else f"#{t}" for t in m.get("tags", "").split(",") if t],
-            "summary"         : doc,
-            "similarity"      : round(1 - dist, 4),
-            "matched_primary" : matched_primary,
-            "total_primary"   : total_primary,
+            "place_id": int(m["place_id"]),
+            "category": m.get("category", ""),
+            "tags": [
+                t if t.startswith("#") else f"#{t}" for t in m.get("tags", "").split(",") if t
+            ],
+            "summary": doc,
+            "similarity": round(1 - dist, 4),
+            "matched_primary": matched_primary,
+            "total_primary": total_primary,
             "matched_secondary": matched_secondary,
         }
 
@@ -277,31 +283,35 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
                 pass
 
     # 1) primary / secondary 키워드별 텍스트 직접 검색
-    primary_kws   = state.get("primary_keywords") or []
+    primary_kws = state.get("primary_keywords") or []
     secondary_kws = state.get("secondary_keywords") or []
     total_primary = len(primary_kws)
 
-    primary_match  : dict[int, set[str]] = {}
+    primary_match: dict[int, set[str]] = {}
     secondary_match: dict[int, set[str]] = {}
-    token_meta_map : dict[int, tuple]    = {}
+    token_meta_map: dict[int, tuple] = {}
 
-    _search_keywords(primary_kws,   primary_match)
+    _search_keywords(primary_kws, primary_match)
     _search_keywords(secondary_kws, secondary_match)
 
     # 2) 시맨틱 검색
     try:
         n_query = min(N_CANDIDATES, len(valid_ids))
-        results  = collection.query(
+        results = collection.query(
             query_embeddings=[embedding],
             n_results=n_query,
             where=where_ids,
             include=["metadatas", "documents", "distances"],
         )
         semantic_list = [
-            _to_candidate(m, doc, dist,
-                          matched_primary=len(primary_match.get(int(m["place_id"]), set())),
-                          total_primary=total_primary,
-                          matched_secondary=len(secondary_match.get(int(m["place_id"]), set())))
+            _to_candidate(
+                m,
+                doc,
+                dist,
+                matched_primary=len(primary_match.get(int(m["place_id"]), set())),
+                total_primary=total_primary,
+                matched_secondary=len(secondary_match.get(int(m["place_id"]), set())),
+            )
             for m, doc, dist in zip(
                 results["metadatas"][0],
                 results["documents"][0],
@@ -314,13 +324,17 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     # 3) 병합: 텍스트 매칭 장소 먼저, 이후 시맨틱 전용 (중복 제거)
     all_matched_pids = set(primary_match.keys()) | set(secondary_match.keys())
     token_candidates = [
-        _to_candidate(m, doc, dist,
-                      matched_primary=len(primary_match.get(pid, set())),
-                      total_primary=total_primary,
-                      matched_secondary=len(secondary_match.get(pid, set())))
+        _to_candidate(
+            m,
+            doc,
+            dist,
+            matched_primary=len(primary_match.get(pid, set())),
+            total_primary=total_primary,
+            matched_secondary=len(secondary_match.get(pid, set())),
+        )
         for pid, (m, doc, dist) in token_meta_map.items()
     ]
-    seen       = set(all_matched_pids)
+    seen = set(all_matched_pids)
     candidates = list(token_candidates)
     for p in semantic_list:
         if p["place_id"] not in seen:
@@ -328,8 +342,8 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
             candidates.append(p)
 
     # 4) 이름 직접 매칭 장소: ChromaDB에서 명시적으로 가져와 맨 앞에 배치
-    name_match_ids_raw   = state.get("name_match_ids") or []
-    valid_set            = set(valid_ids)
+    name_match_ids_raw = state.get("name_match_ids") or []
+    valid_set = set(valid_ids)
     name_match_ids_valid = [pid for pid in name_match_ids_raw if pid in valid_set]
     if name_match_ids_valid:
         nm_where = {"place_id": {"$in": [str(pid) for pid in name_match_ids_valid]}}
@@ -345,13 +359,17 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
                 nm_res["metadatas"][0], nm_res["documents"][0], nm_res["distances"][0]
             ):
                 pid = int(m["place_id"])
-                c = _to_candidate(m, doc, dist,
-                                  matched_primary=len(primary_match.get(pid, set())),
-                                  total_primary=total_primary,
-                                  matched_secondary=len(secondary_match.get(pid, set())))
+                c = _to_candidate(
+                    m,
+                    doc,
+                    dist,
+                    matched_primary=len(primary_match.get(pid, set())),
+                    total_primary=total_primary,
+                    matched_secondary=len(secondary_match.get(pid, set())),
+                )
                 c["is_name_match"] = True
                 nm_candidates.append(c)
-            nm_pids    = {c["place_id"] for c in nm_candidates}
+            nm_pids = {c["place_id"] for c in nm_candidates}
             candidates = nm_candidates + [c for c in candidates if c["place_id"] not in nm_pids]
         except Exception:
             pass
@@ -361,7 +379,8 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     if exclusion_kws:
         exclusion_tag_kws = {kw for kw in exclusion_kws if kw in _ALL_TAG_NAMES}
         candidates = [
-            c for c in candidates
+            c
+            for c in candidates
             if not any(kw in c["summary"] for kw in exclusion_kws)
             and not (exclusion_tag_kws & {t.lstrip("#") for t in c.get("tags", [])})
         ]
@@ -374,8 +393,7 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
     if cuisine_primaries:
         conflicting = _CUISINE_TAGS - cuisine_primaries
         candidates = [
-            c for c in candidates
-            if not (conflicting & {t.lstrip("#") for t in c.get("tags", [])})
+            c for c in candidates if not (conflicting & {t.lstrip("#") for t in c.get("tags", [])})
         ]
 
     # 7) 태그명 primary 키워드: 텍스트 매칭 외에 후보의 태그 메타데이터로도 matched_primary 보정
@@ -396,37 +414,42 @@ def _node_retrieve(state: PlaceRAGState) -> PlaceRAGState:
 
 def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     """LLM이 후보 중 최적 장소 선별 + 전체 추천 요약 생성"""
-    question           = state["question"]
-    candidates         = state["candidates"]
-    primary_kws        = state.get("primary_keywords") or []
-    secondary_kws      = state.get("secondary_keywords") or []
-    n_results          = 10
+    question = state["question"]
+    candidates = state["candidates"]
+    primary_kws = state.get("primary_keywords") or []
+    secondary_kws = state.get("secondary_keywords") or []
+    n_results = 10
 
     _PRIORITY = {"name_match": -1, "exact": 0, "relevant": 1, "curated": 2}
-    _LABELS   = {
+    _LABELS = {
         "name_match": " [NAME_MATCH: 이름 직접 일치]",
-        "exact":      " [EXACT: 검색 아이템 실제 보유]",
-        "relevant":   " [RELEVANT: 키워드 언급됨]",
-        "curated":    " [CURATED: 취향 기반 선별]",
+        "exact": " [EXACT: 검색 아이템 실제 보유]",
+        "relevant": " [RELEVANT: 키워드 언급됨]",
+        "curated": " [CURATED: 취향 기반 선별]",
     }
     sorted_candidates = sorted(candidates, key=lambda p: _PRIORITY[_match_type(p)])
 
     # primary_str을 no_exact_note보다 먼저 정의해야 f-string에서 참조 가능
-    primary_str   = ", ".join(primary_kws)   if primary_kws   else "없음"
+    primary_str = ", ".join(primary_kws) if primary_kws else "없음"
     secondary_str = ", ".join(secondary_kws) if secondary_kws else "없음"
 
-    exact_count    = sum(1 for p in sorted_candidates if _match_type(p) == "exact")
+    exact_count = sum(1 for p in sorted_candidates if _match_type(p) == "exact")
     relevant_count = sum(1 for p in sorted_candidates if _match_type(p) == "relevant")
-    no_exact_note  = ""
+    no_exact_note = ""
     # primary 키워드가 정의된 태그명이면 해당 속성은 대구 데이터에 실제로 존재하는 것이므로
     # 텍스트 매칭 결과와 무관하게 "찾지 못했다" 안내를 발동하지 않는다.
     # 태그에도 없고 텍스트 매칭도 안 된 경우(에펠탑 등)에만 발동.
     # LLM이 "고급스러운 한식"처럼 compound로 만들 수 있으므로 포함 여부로 체크
-    _primary_has_tag   = bool(primary_kws) and any(
+    _primary_has_tag = bool(primary_kws) and any(
         tag in kw for kw in primary_kws for tag in _ALL_TAG_NAMES
     )
     _primary_unmatched = bool(primary_kws) and exact_count == 0 and not _primary_has_tag
-    _all_curated       = bool(sorted_candidates) and exact_count == 0 and relevant_count == 0 and not _primary_has_tag
+    _all_curated = (
+        bool(sorted_candidates)
+        and exact_count == 0
+        and relevant_count == 0
+        and not _primary_has_tag
+    )
     if _primary_unmatched or _all_curated:
         search_term = primary_str if primary_kws else state["keyword"]
         no_exact_note = (
@@ -439,8 +462,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
 
     context = "\n".join(
         f"- place_id: {p['place_id']} | 카테고리: {p['category']} | "
-        f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}"
-        + _LABELS[_match_type(p)]
+        f"태그: {','.join(p['tags'])} | 요약: {p['summary'][:200]}" + _LABELS[_match_type(p)]
         for p in sorted_candidates
     )
 
@@ -512,7 +534,7 @@ def _node_generate(state: PlaceRAGState) -> PlaceRAGState:
     except Exception:
         raw = {}
 
-    ranked     = raw.get("places", [])
+    ranked = raw.get("places", [])
     ai_summary = raw.get("summary", "")
 
     candidate_map = {p["place_id"]: p for p in candidates}
@@ -540,18 +562,20 @@ def _node_no_result(state: PlaceRAGState) -> PlaceRAGState:
 
 # ── 조건부 엣지 ───────────────────────────────────────────────────────────────
 
+
 def _route_after_retrieve(state: PlaceRAGState) -> str:
     return "generate" if state["candidates"] else "no_result"
 
 
 # ── 그래프 컴파일 ─────────────────────────────────────────────────────────────
 
+
 def _build_graph() -> StateGraph:
     wf = StateGraph(PlaceRAGState)
 
-    wf.add_node("rewrite",   _node_rewrite)
-    wf.add_node("retrieve",  _node_retrieve)
-    wf.add_node("generate",  _node_generate)
+    wf.add_node("rewrite", _node_rewrite)
+    wf.add_node("retrieve", _node_retrieve)
+    wf.add_node("generate", _node_generate)
     wf.add_node("no_result", _node_no_result)
 
     wf.set_entry_point("rewrite")
@@ -561,7 +585,7 @@ def _build_graph() -> StateGraph:
         _route_after_retrieve,
         {"generate": "generate", "no_result": "no_result"},
     )
-    wf.add_edge("generate",  END)
+    wf.add_edge("generate", END)
     wf.add_edge("no_result", END)
 
     return wf.compile()
@@ -571,6 +595,7 @@ _graph = _build_graph()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def run_rag(
     keyword: str,
@@ -589,19 +614,19 @@ def run_rag(
         return {"places": [], "ai_summary": ""}
 
     initial: PlaceRAGState = {
-        "keyword"           : keyword,
-        "question"          : keyword,
-        "primary_keywords"  : [],
+        "keyword": keyword,
+        "question": keyword,
+        "primary_keywords": [],
         "secondary_keywords": [],
         "exclusion_keywords": [],
-        "name_match_ids"    : name_match_ids or [],
-        "embedding"         : [],
-        "valid_ids"         : valid_ids,
-        "candidates"        : [],
-        "results"           : [],
-        "ai_summary"        : "",
-        "weather_info"      : weather_info or {},
-        "visit_context"     : visit_context or {},
+        "name_match_ids": name_match_ids or [],
+        "embedding": [],
+        "valid_ids": valid_ids,
+        "candidates": [],
+        "results": [],
+        "ai_summary": "",
+        "weather_info": weather_info or {},
+        "visit_context": visit_context or {},
     }
 
     try:
@@ -624,15 +649,14 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
     # SQLAlchemy 관계 해소를 위해 모든 모델 선로드
-    import models.user               # noqa: F401
     import models.history_and_event  # noqa: F401
-    import models.tag                # noqa: F401
-    import models.place              # noqa: F401
-
+    import models.place  # noqa: F401
+    import models.tag  # noqa: F401
+    import models.user  # noqa: F401
     from db.mysql import SessionLocal
-    from services.place_service import get_filtered_place_ids, get_name_match_ids
-    from services.landmarks import find_landmark
     from schemas.request import PlaceSearchRequest
+    from services.landmarks import find_landmark
+    from services.place_service import get_filtered_place_ids, get_name_match_ids
 
     def _run_test(
         keyword: str,
@@ -641,29 +665,34 @@ if __name__ == "__main__":
         tag_ids: list[int] | None = None,
         weather_info: dict | None = None,
         visit_context: dict | None = None,
-        ref_lat: float | None = None,   # 직접 좌표 지정 (랜드마크 자동 감지보다 우선)
+        ref_lat: float | None = None,  # 직접 좌표 지정 (랜드마크 자동 감지보다 우선)
         ref_lng: float | None = None,
         radius_km: float = 0.71,
     ):
-        print(f"\n{'='*65}")
+        print(f"\n{'=' * 65}")
         print(f"  키워드  : {keyword}")
         print(f"  카테고리: {category or '전체'}")
         print(f"  지역    : {regions or '전체'}")
         if tag_ids:
             print(f"  선호태그: tag_ids={tag_ids}")
         if weather_info:
-            print(f"  날씨    : {weather_info.get('condition')} {weather_info.get('temperature')}°C")
+            print(
+                f"  날씨    : {weather_info.get('condition')} {weather_info.get('temperature')}°C"
+            )
         if visit_context:
             _DAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
             vc = visit_context
             d = vc.get("target_date")
             from datetime import date as _date
+
             today = _date.today()
             if d:
                 diff = (d - today).days
-                label = {0: "오늘", 1: "내일", 2: "모레"}.get(diff, f"{diff}일 후" if diff > 0 else f"{-diff}일 전")
+                label = {0: "오늘", 1: "내일", 2: "모레"}.get(
+                    diff, f"{diff}일 후" if diff > 0 else f"{-diff}일 전"
+                )
                 print(f"  방문날짜: {d.strftime('%Y-%m-%d')}({_DAY_KR[d.weekday()]}요일) ← {label}")
-        print(f"{'='*65}")
+        print(f"{'=' * 65}")
 
         db = SessionLocal()
         try:
@@ -684,7 +713,9 @@ if __name__ == "__main__":
 
             # 지역 필터와 위치 필터 충돌 경고
             if regions and final_lat is not None:
-                print(f"  [경고] regions={regions} 와 위치 필터가 AND 조건으로 적용됩니다. 교집합이 없으면 결과 0건.")
+                print(
+                    f"  [경고] regions={regions} 와 위치 필터가 AND 조건으로 적용됩니다. 교집합이 없으면 결과 0건."
+                )
 
             req = PlaceSearchRequest(
                 keyword=keyword,
@@ -697,7 +728,7 @@ if __name__ == "__main__":
                 ref_lng=final_lng,
                 radius_km=radius_km,
             )
-            valid_ids      = get_filtered_place_ids(db, req)
+            valid_ids = get_filtered_place_ids(db, req)
             name_match_ids = get_name_match_ids(db, keyword, valid_ids)
         finally:
             db.close()
@@ -713,7 +744,7 @@ if __name__ == "__main__":
 
         # ── TOURIST_SPOT: RAG 실행 → 부족하면 선호태그 풀 랜덤 → 전체 랜덤 채움 ──
         if category == "TOURIST_SPOT":
-            print(f"\n[TOURIST_SPOT] RAG 실행 후 부족하면 랜덤으로 채움")
+            print("\n[TOURIST_SPOT] RAG 실행 후 부족하면 랜덤으로 채움")
 
             result = run_rag(
                 keyword=keyword,
@@ -724,8 +755,10 @@ if __name__ == "__main__":
             )
 
             import random as _random
-            from models.place import Place as _Place
+
             from sqlalchemy.orm import joinedload as _jl
+
+            from models.place import Place as _Place
 
             places = result["places"]
             existing_ids = {p["place_id"] for p in places}
@@ -735,20 +768,29 @@ if __name__ == "__main__":
                 remaining_valid = [pid for pid in valid_ids if pid not in existing_ids]
                 remaining = 10 - len(places)
                 if remaining_valid:
-                    sample_ids = _random.sample(remaining_valid, min(remaining, len(remaining_valid)))
+                    sample_ids = _random.sample(
+                        remaining_valid, min(remaining, len(remaining_valid))
+                    )
                     db2 = SessionLocal()
                     try:
-                        rows = db2.query(_Place).options(_jl(_Place.tags)).filter(
-                            _Place.place_id.in_(sample_ids)
-                        ).all()
+                        rows = (
+                            db2.query(_Place)
+                            .options(_jl(_Place.tags))
+                            .filter(_Place.place_id.in_(sample_ids))
+                            .all()
+                        )
                     finally:
                         db2.close()
                     for p in rows:
-                        places.append({
-                            "place_id": p.place_id, "category": p.category,
-                            "tags": [t.tag_name for t in p.tags],
-                            "similarity": None, "match_type": "location",
-                        })
+                        places.append(
+                            {
+                                "place_id": p.place_id,
+                                "category": p.category,
+                                "tags": [t.tag_name for t in p.tags],
+                                "similarity": None,
+                                "match_type": "location",
+                            }
+                        )
                     existing_ids.update(p["place_id"] for p in places)
 
             # 전체 TOURIST_SPOT에서 남은 자리 채우기
@@ -756,20 +798,29 @@ if __name__ == "__main__":
             if remaining > 0:
                 db2 = SessionLocal()
                 try:
-                    any_rows = db2.query(_Place).options(_jl(_Place.tags)).filter(
-                        _Place.category == "TOURIST_SPOT",
-                        _Place.place_id.notin_(existing_ids),
-                    ).all()
+                    any_rows = (
+                        db2.query(_Place)
+                        .options(_jl(_Place.tags))
+                        .filter(
+                            _Place.category == "TOURIST_SPOT",
+                            _Place.place_id.notin_(existing_ids),
+                        )
+                        .all()
+                    )
                 finally:
                     db2.close()
                 for p in _random.sample(any_rows, min(remaining, len(any_rows))):
-                    places.append({
-                        "place_id": p.place_id, "category": p.category,
-                        "tags": [t.tag_name for t in p.tags],
-                        "similarity": None, "match_type": "location",
-                    })
+                    places.append(
+                        {
+                            "place_id": p.place_id,
+                            "category": p.category,
+                            "tags": [t.tag_name for t in p.tags],
+                            "similarity": None,
+                            "match_type": "location",
+                        }
+                    )
 
-            print(f"\n{'─'*65}")
+            print(f"\n{'─' * 65}")
             print(f"최종 추천 {len(places)}개\n")
             for i, p in enumerate(places, 1):
                 print(f"  [{i}] place_id={p['place_id']}  [{p.get('match_type', 'curated')}]")
@@ -782,17 +833,22 @@ if __name__ == "__main__":
 
         # ── 이름 매칭 시 RAG 건너뜀 (place_router.py search_places 동일 로직) ──
         if name_match_ids:
-            print(f"\n[NAME_MATCH] 이름 직접 매칭 → RAG 없이 DB에서 즉시 반환")
+            print("\n[NAME_MATCH] 이름 직접 매칭 → RAG 없이 DB에서 즉시 반환")
             db2 = SessionLocal()
             try:
-                from models.place import Place as _Place
                 from sqlalchemy.orm import joinedload as _jl
-                places_raw = db2.query(_Place).options(_jl(_Place.tags)).filter(
-                    _Place.place_id.in_(name_match_ids)
-                ).all()
+
+                from models.place import Place as _Place
+
+                places_raw = (
+                    db2.query(_Place)
+                    .options(_jl(_Place.tags))
+                    .filter(_Place.place_id.in_(name_match_ids))
+                    .all()
+                )
             finally:
                 db2.close()
-            print(f"\n{'─'*65}")
+            print(f"\n{'─' * 65}")
             print(f"최종 추천 {len(places_raw)}개  [name_match]\n")
             for i, p in enumerate(places_raw, 1):
                 print(f"  [{i}] place_id  : {p.place_id}  [name_match]")
@@ -803,32 +859,32 @@ if __name__ == "__main__":
             return
 
         # ── RAG 파이프라인 ───────────────────────────────────────────────
-        print(f"\n[2~4단계] RAG 파이프라인 실행 중 ...")
+        print("\n[2~4단계] RAG 파이프라인 실행 중 ...")
 
         # 중간 상태를 출력하려면 그래프를 stream으로 실행
         initial: PlaceRAGState = {
-            "keyword"           : keyword,
-            "question"          : keyword,
-            "primary_keywords"  : [],
+            "keyword": keyword,
+            "question": keyword,
+            "primary_keywords": [],
             "secondary_keywords": [],
             "exclusion_keywords": [],
-            "name_match_ids"    : name_match_ids,
-            "embedding"         : [],
-            "valid_ids"         : valid_ids,
-            "candidates"        : [],
-            "results"           : [],
-            "ai_summary"        : "",
-            "weather_info"      : weather_info or {},
-            "visit_context"     : visit_context or {},
+            "name_match_ids": name_match_ids,
+            "embedding": [],
+            "valid_ids": valid_ids,
+            "candidates": [],
+            "results": [],
+            "ai_summary": "",
+            "weather_info": weather_info or {},
+            "visit_context": visit_context or {},
         }
 
         state = initial.copy()
         for step in _graph.stream(initial):
             node_name = next(iter(step))
-            node_out  = step[node_name]
+            node_out = step[node_name]
 
             if node_name == "rewrite":
-                print(f"\n  [rewrite]")
+                print("\n  [rewrite]")
                 print(f"    원본        : {keyword}")
                 print(f"    재작성      : {node_out.get('question', '')}")
                 print(f"    primary     : {node_out.get('primary_keywords', [])}")
@@ -850,24 +906,26 @@ if __name__ == "__main__":
                     elif mp > 0:
                         mark = f" ★RELEVANT(primary {mp}/{tp})"
                     elif ms > 0:
-                        mark = f" ★RELEVANT(secondary)"
+                        mark = " ★RELEVANT(secondary)"
                     else:
                         mark = ""
-                    print(f"    {c['place_id']} | {c['category']} | 유사도 {c['similarity']} | {c['tags']}{mark}")
+                    print(
+                        f"    {c['place_id']} | {c['category']} | 유사도 {c['similarity']} | {c['tags']}{mark}"
+                    )
                 state.update(node_out)
 
             elif node_name == "generate":
-                print(f"\n  [generate] LLM 추천 선별 완료")
+                print("\n  [generate] LLM 추천 선별 완료")
                 state.update(node_out)
 
             elif node_name == "no_result":
-                print(f"\n  [no_result] 유효한 후보 없음")
+                print("\n  [no_result] 유효한 후보 없음")
                 state.update(node_out)
 
         # ── 최종 결과 출력 ──────────────────────────────────────────────
-        results    = state.get("results", [])
+        results = state.get("results", [])
         ai_summary = state.get("ai_summary", "")
-        print(f"\n{'─'*65}")
+        print(f"\n{'─' * 65}")
         print(f"최종 추천 {len(results)}개\n")
         for i, place in enumerate(results, 1):
             print(f"  [{i}] place_id  : {place['place_id']}  [{_match_type(place)}]")
@@ -904,8 +962,6 @@ if __name__ == "__main__":
     #     category="cafe",
     # )
 
-    from datetime import date, time
-
     # ── 기존 테스트 ───────────────────────────────────────────────────────────
     # _run_test(
     #     keyword="여자친구랑 처음 카이막에 도전하는데 커피랑 카이막이 맛있는 카페를 추천해줘",
@@ -915,7 +971,6 @@ if __name__ == "__main__":
     #     visit_context={"category": "카페", "target_date": date(2026, 5, 27)},
     #     regions=["중구"]
     # )
-
 
     # [6] 좌표 직접 지정 — DB 장소 좌표 또는 임의 좌표로 주변 검색
     # 예: 수성못 좌표(35.8523, 128.6318) 반경 1km 내 카페
@@ -992,7 +1047,6 @@ if __name__ == "__main__":
     #     },
     # )
 
-   
     # _run_test(
     #     keyword=(
     #         "동대구역 근처 밤 9시 넘어서 운영하는 맛집"
