@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     CHROMADB_HOST: str
     CHROMADB_PORT: int
-    CELERY_BROKER_URL: str
     OPENAI_API_KEY: str
     GOOGLE_OAUTH_CLIENT_ID: str
     WEATHER_API_KEY: str
